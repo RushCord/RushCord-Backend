@@ -15,7 +15,15 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
-    origin: "http://localhost:5173",
+    origin: (origin, callback) => {
+        // Cho phép web frontend, mobile app (không có origin), và local network
+        const allowedOrigins = ["http://localhost:5173", "http://localhost:8081"];
+        if (!origin || allowedOrigins.includes(origin) || /^http:\/\/192\.168\.\d+\.\d+/.test(origin) || /^http:\/\/10\.0\.\d+\.\d+/.test(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error("Not allowed by CORS"));
+        }
+    },
     credentials: true,
 }))
 
