@@ -94,6 +94,7 @@ io.on("connection", (socket) => {
         answer,
       });
     }
+    console.log("📥 Received answer from", userId);
   });
 
   // 🌐 ICE Candidate
@@ -105,6 +106,7 @@ io.on("connection", (socket) => {
         from: userId,
         candidate,
       });
+      console.log("📥 Received ICE candidate from", userId);
     }
   });
 
