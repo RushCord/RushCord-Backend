@@ -4,22 +4,29 @@
   "description": "",
   "main": "src/index.js",
   "scripts": {
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "db:create-table": "node scripts/create-dynamodb-table.js",
+    "cdk:synth": "npm run synth --prefix infra/cdk",
+    "cdk:bootstrap": "npm run bootstrap --prefix infra/cdk",
+    "cdk:deploy": "npm run deploy --prefix infra/cdk"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1030.0",
+    "@aws-sdk/client-dynamodb": "^3.1030.0",
+    "@aws-sdk/client-s3": "^3.1030.0",
+    "@aws-sdk/lib-dynamodb": "^3.1030.0",
+    "@aws-sdk/s3-request-presigner": "^3.1030.0",
+    "aws-jwt-verify": "^5.1.1",
     "bcryptjs": "^3.0.3",
-    "cloudinary": "^2.9.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.2.1",
-    "multer": "^2.1.1",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
