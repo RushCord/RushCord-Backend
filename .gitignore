@@ -56,3 +56,8 @@ coverage/
 # TYPESCRIPT
 # =========================
 *.tsbuildinfo
+
+# =========================
+# AWS CDK
+# =========================
+infra/cdk/cdk.out/
