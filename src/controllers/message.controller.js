@@ -6,7 +6,9 @@ const {
   sendDirectMessage,
   recallMessage: recallMessageSvc,
   recallMessageMe: recallMessageMeSvc,
+  editMessageText: editMessageTextSvc,
   forwardMessage: forwardMessageSvc,
+  reactToMessage: reactToMessageSvc,
 } = require("../services/messageService");
 
 const getUsersForSideBar = async (req, res) => {
@@ -267,6 +269,93 @@ const forwardMessage = async (req, res) => {
   }
 };
 
+const editMessageText = async (req, res) => {
+  try {
+    const messageId = req.params.id;
+    const userId = req.user._id;
+    const { text } = req.body ?? {};
+
+    let message;
+    try {
+      message = await editMessageTextSvc(messageId, userId, text);
+    } catch (e) {
+      if (e.code === "NOT_ALLOWED") {
+        return res.status(403).json({ error: "Not allowed" });
+      }
+      if (e.code === "MESSAGE_RECALLED") {
+        return res.status(400).json({ error: "Message was recalled" });
+      }
+      if (e.code === "INVALID_TEXT") {
+        return res.status(400).json({ error: "Invalid text" });
+      }
+      throw e;
+    }
+
+    if (!message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    const receiverSocketId = getReceiverSocketId(String(message.receiverId));
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("messageEdited", message);
+    }
+
+    const senderSocketId = getReceiverSocketId(String(userId));
+    if (senderSocketId) {
+      io.to(senderSocketId).emit("messageEdited", message);
+    }
+
+    res.json(message);
+  } catch (error) {
+    console.error("Edit message error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+const reactToMessage = async (req, res) => {
+  try {
+    const messageId = req.params.id;
+    const userId = req.user._id;
+    const { emoji } = req.body ?? {};
+
+    let message;
+    try {
+      message = await reactToMessageSvc(messageId, userId, emoji);
+    } catch (e) {
+      if (e.code === "NOT_ALLOWED") {
+        return res.status(403).json({ error: "Not allowed" });
+      }
+      if (e.code === "MESSAGE_RECALLED") {
+        return res.status(400).json({ error: "Message was recalled" });
+      }
+      if (e.code === "INVALID_EMOJI") {
+        return res.status(400).json({ error: "Invalid emoji" });
+      }
+      throw e;
+    }
+
+    if (!message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Broadcast to both participants (sender & receiver)
+    const receiverSocketId = getReceiverSocketId(String(message.receiverId));
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("messageReactionUpdated", message);
+    }
+
+    const senderSocketId = getReceiverSocketId(String(message.senderId));
+    if (senderSocketId) {
+      io.to(senderSocketId).emit("messageReactionUpdated", message);
+    }
+
+    res.json(message);
+  } catch (error) {
+    console.error("React message error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
 module.exports = {
   getUsersForSideBar,
   getMessages,
@@ -274,4 +363,6 @@ module.exports = {
   forwardMessage,
   recallMessage,
   recallMessageMe,
+  editMessageText,
+  reactToMessage,
 };

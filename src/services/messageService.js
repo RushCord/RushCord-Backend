@@ -36,6 +36,19 @@ function messageToLegacy(item, viewerId) {
   if (!item) return null;
   const recalled = item.recallScope === "ALL";
   const deletedForMe = hasHiddenFor(item, viewerId);
+  const isEdited = Array.isArray(item.editHistory) && item.editHistory.length > 0;
+  const reactionCounts = (() => {
+    const r = item.reactionsByEmoji;
+    if (!r || typeof r !== "object") return {};
+    const out = {};
+    for (const [emoji, users] of Object.entries(r)) {
+      if (!emoji) continue;
+      if (users instanceof Set) out[emoji] = users.size;
+      else if (Array.isArray(users)) out[emoji] = users.length;
+      else out[emoji] = 0;
+    }
+    return out;
+  })();
   const dto = {
     _id: item.messageId,
     senderId: item.senderId,
@@ -43,10 +56,16 @@ function messageToLegacy(item, viewerId) {
     isForwarded: !!item.isForwarded,
     isRecalled: recalled,
     isDeletedForMe: deletedForMe,
+    isEdited,
+    editedAt: typeof item.editedAt === "string" ? item.editedAt : undefined,
     createdAt: item.createdAt,
+    reactionCounts,
   };
   if (!recalled && !deletedForMe) {
     if (item.text) dto.text = item.text;
+    if (isEdited) {
+      dto.editHistory = Array.isArray(item.editHistory) ? item.editHistory : [];
+    }
     if (Array.isArray(item.mediaItems) && item.mediaItems.length > 0) {
       const urls = item.mediaItems
         .map((m) => m?.publicUrl)
@@ -217,6 +236,7 @@ async function sendDirectMessage({
     isForwarded: !!isForwarded,
     recallScope: null,
     editHistory: [],
+    reactionsByEmoji: {},
     ...(mediaItems ? { mediaItems } : {}),
   };
 
@@ -434,6 +454,65 @@ async function recallMessageMe(messageId, userId) {
   return messageToLegacy(updated, userId);
 }
 
+async function editMessageText(messageId, userId, nextTextRaw) {
+  const item = await getMessageById(messageId);
+  if (!item) return null;
+  if (item.senderId !== userId) {
+    const err = new Error("NOT_ALLOWED");
+    err.code = "NOT_ALLOWED";
+    throw err;
+  }
+  if (item.recallScope === "ALL") {
+    const err = new Error("MESSAGE_RECALLED");
+    err.code = "MESSAGE_RECALLED";
+    throw err;
+  }
+
+  const nextText = typeof nextTextRaw === "string" ? nextTextRaw.trim() : "";
+  if (!nextText) {
+    const err = new Error("INVALID_TEXT");
+    err.code = "INVALID_TEXT";
+    throw err;
+  }
+
+  const prevText = typeof item.text === "string" ? item.text : "";
+  if (nextText === prevText) {
+    // no-op: still return current shape
+    return messageToLegacy(item, userId);
+  }
+
+  const editedAt = new Date().toISOString();
+  const historyEntry = {
+    editedAt,
+    prevText,
+    nextText,
+  };
+
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TableName(),
+      Key: { PK: item.PK, SK: item.SK },
+      UpdateExpression: [
+        "SET #txt = :t, editedAt = :ea",
+        ", editHistory = list_append(if_not_exists(editHistory, :empty), :h)",
+      ].join(" "),
+      ExpressionAttributeNames: {
+        "#txt": "text",
+      },
+      ExpressionAttributeValues: {
+        ":t": nextText,
+        ":ea": editedAt,
+        ":empty": [],
+        ":h": [historyEntry],
+      },
+      ReturnValues: "ALL_NEW",
+    }),
+  );
+
+  const updated = await getMessageById(messageId);
+  return messageToLegacy(updated, userId);
+}
+
 async function forwardMessage({ senderId, receiverId, sourceMessageId }) {
   const src = await getMessageById(sourceMessageId);
   if (!src) {
@@ -477,6 +556,62 @@ async function forwardMessage({ senderId, receiverId, sourceMessageId }) {
   });
 }
 
+function normalizeEmoji(input) {
+  if (typeof input !== "string") return "";
+  return input.trim();
+}
+
+async function reactToMessage(messageId, userId, emojiRaw) {
+  const emoji = normalizeEmoji(emojiRaw);
+  if (!emoji) {
+    const err = new Error("INVALID_EMOJI");
+    err.code = "INVALID_EMOJI";
+    throw err;
+  }
+
+  const item = await getMessageById(messageId);
+  if (!item) return null;
+  if (item.recallScope === "ALL") {
+    const err = new Error("MESSAGE_RECALLED");
+    err.code = "MESSAGE_RECALLED";
+    throw err;
+  }
+  if (item.senderId !== userId && item.receiverId !== userId) {
+    const err = new Error("NOT_ALLOWED");
+    err.code = "NOT_ALLOWED";
+    throw err;
+  }
+
+  const current = item.reactionsByEmoji || {};
+  const existing = current[emoji];
+  const hasReacted =
+    (existing instanceof Set && existing.has(String(userId))) ||
+    (Array.isArray(existing) && existing.includes(String(userId)));
+
+  // We'll store as DynamoDB String Set for uniqueness.
+  const pathName = "#r.#e";
+  const ExpressionAttributeNames = { "#r": "reactionsByEmoji", "#e": emoji };
+  const ExpressionAttributeValues = { ":u": new Set([String(userId)]) };
+
+  const UpdateExpression = hasReacted
+    ? `DELETE ${pathName} :u`
+    : `ADD ${pathName} :u`;
+
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TableName(),
+      Key: { PK: item.PK, SK: item.SK },
+      UpdateExpression,
+      ExpressionAttributeNames,
+      ExpressionAttributeValues,
+      ReturnValues: "ALL_NEW",
+    }),
+  );
+
+  const updated = await getMessageById(messageId);
+  return messageToLegacy(updated, userId);
+}
+
 module.exports = {
   messageToLegacy,
   listDirectMessages,
@@ -484,5 +619,7 @@ module.exports = {
   getMessageById,
   recallMessage,
   recallMessageMe,
+  editMessageText,
   forwardMessage,
+  reactToMessage,
 };

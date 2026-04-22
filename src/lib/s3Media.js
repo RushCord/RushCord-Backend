@@ -33,10 +33,12 @@ function getMediaPolicy() {
 
   const imageMaxMb = parsePositiveInt(process.env.MEDIA_MAX_IMAGE_MB);
   const videoMaxMb = parsePositiveInt(process.env.MEDIA_MAX_VIDEO_MB);
+  const audioMaxMb = parsePositiveInt(process.env.MEDIA_MAX_AUDIO_MB);
   const docMaxMb = parsePositiveInt(process.env.MEDIA_MAX_DOC_MB);
 
   const maxImageBytes = (imageMaxMb ?? 5) * MB;
   const maxVideoBytes = (videoMaxMb ?? 100) * MB;
+  const maxAudioBytes = (audioMaxMb ?? 20) * MB;
   const maxDocBytes = (docMaxMb ?? 20) * MB;
 
   // Fallback for environments that do not set MEDIA_ALLOWED_MIME.
@@ -47,6 +49,12 @@ function getMediaPolicy() {
     "image/gif",
     "video/mp4",
     "video/webm",
+    // Voice messages / audio attachments
+    "audio/webm",
+    "audio/ogg",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/wav",
     "application/pdf",
     "application/msword",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -60,6 +68,7 @@ function getMediaPolicy() {
       const ct = String(contentType || "").toLowerCase();
       if (ct.startsWith("image/")) return maxImageBytes;
       if (ct.startsWith("video/")) return maxVideoBytes;
+      if (ct.startsWith("audio/")) return maxAudioBytes;
       if (ct === "application/pdf") return maxDocBytes;
       if (ct === "application/msword") return maxDocBytes;
       if (
@@ -71,6 +80,7 @@ function getMediaPolicy() {
     },
     maxImageBytes,
     maxVideoBytes,
+    maxAudioBytes,
     maxDocBytes,
   };
 
