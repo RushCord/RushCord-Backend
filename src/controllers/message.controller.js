@@ -30,6 +30,11 @@ const getMessages = async (req, res) => {
     const messages = await listDirectMessages(myId, userToChatId);
     res.status(200).json(messages);
   } catch (error) {
+    if (error.code === "NOT_FRIENDS") {
+      return res
+        .status(403)
+        .json({ error: "You can only DM friends", code: "NOT_FRIENDS" });
+    }
     console.log("Error in getMessages controller: ", error.message);
     res.status(500).json({ error: "Internal server error" });
   }
@@ -154,6 +159,11 @@ const sendMessage = async (req, res) => {
   } catch (error) {
     if (error.code === "USER_NOT_FOUND") {
       return res.status(404).json({ error: "User not found" });
+    }
+    if (error.code === "NOT_FRIENDS") {
+      return res
+        .status(403)
+        .json({ error: "You can only DM friends", code: "NOT_FRIENDS" });
     }
     console.log("Error in sendMessage:", error.message);
     res.status(500).json({ error: "Internal server error" });

@@ -2,6 +2,8 @@ const { Server } = require("socket.io");
 const http = require("http");
 const express = require("express");
 const { verifyAccessToken } = require("./cognitoVerifier");
+const { assertUserInConversation } = require("../services/conversationService");
+const { listConversationMembers } = require("../services/conversationsService");
 
 const app = express();
 const server = http.createServer(app);
@@ -69,14 +71,72 @@ io.on("connection", (socket) => {
   });
 
   // =========================
+  // 🧩 CONVERSATION ROOMS (GROUP/DM)
+  // =========================
+  socket.on("joinConversation", ({ conversationId } = {}) => {
+    const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+    if (!cid) return;
+    socket.join(cid);
+  });
+
+  socket.on("leaveConversation", ({ conversationId } = {}) => {
+    const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+    if (!cid) return;
+    socket.leave(cid);
+  });
+
+  socket.on("typingInConversation", ({ conversationId } = {}) => {
+    const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+    if (!cid) return;
+    socket.to(cid).emit("typingInConversation", { from: userId, conversationId: cid });
+  });
+
+  socket.on("stopTypingInConversation", ({ conversationId } = {}) => {
+    const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+    if (!cid) return;
+    socket.to(cid).emit("stopTypingInConversation", { from: userId, conversationId: cid });
+  });
+
+  // =========================
   // 🎥 LIVEKIT CALL CONTROL (no SDP/ICE signaling)
   // =========================
+  socket.on("callInviteGroup", async ({ conversationId } = {}) => {
+    try {
+      const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+      if (!cid) return;
+
+      // Permission: only members can start/invite into the room.
+      await assertUserInConversation({ conversationId: cid, userId });
+
+      const members = await listConversationMembers(cid);
+      for (const m of Array.isArray(members) ? members : []) {
+        const memberUserId = m?.userId ? String(m.userId) : "";
+        if (!memberUserId) continue;
+        if (memberUserId === String(userId)) continue;
+        if (m?.status && String(m.status).toUpperCase() !== "ACCEPTED") continue;
+
+        const receiverSocketId = getReceiverSocketId(memberUserId);
+        if (!receiverSocketId) continue;
+        io.to(receiverSocketId).emit("incomingCall", {
+          from: userId,
+          roomName: cid,
+          conversationId: cid,
+          kind: "GROUP",
+        });
+      }
+    } catch (e) {
+      // best effort; do not crash socket handler
+      console.error("callInviteGroup error:", e?.message || e);
+    }
+  });
+
   socket.on("callInvite", ({ to, roomName } = {}) => {
     const receiverSocketId = getReceiverSocketId(to);
     if (receiverSocketId) {
       io.to(receiverSocketId).emit("incomingCall", {
         from: userId,
         roomName,
+        kind: "DM",
       });
     }
   });
@@ -108,6 +168,33 @@ io.on("connection", (socket) => {
         from: userId,
         roomName,
       });
+    }
+  });
+
+  socket.on("hangupGroup", async ({ conversationId } = {}) => {
+    try {
+      const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+      if (!cid) return;
+      await assertUserInConversation({ conversationId: cid, userId });
+
+      const members = await listConversationMembers(cid);
+      for (const m of Array.isArray(members) ? members : []) {
+        const memberUserId = m?.userId ? String(m.userId) : "";
+        if (!memberUserId) continue;
+        if (memberUserId === String(userId)) continue;
+        if (m?.status && String(m.status).toUpperCase() !== "ACCEPTED") continue;
+
+        const receiverSocketId = getReceiverSocketId(memberUserId);
+        if (!receiverSocketId) continue;
+        io.to(receiverSocketId).emit("hangup", {
+          from: userId,
+          roomName: cid,
+          conversationId: cid,
+          kind: "GROUP",
+        });
+      }
+    } catch (e) {
+      console.error("hangupGroup error:", e?.message || e);
     }
   });
 

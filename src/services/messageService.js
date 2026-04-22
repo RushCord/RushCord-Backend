@@ -20,6 +20,7 @@ const {
   gsi2InboxSk,
 } = require("../lib/keys");
 const { getProfileRaw } = require("./userService");
+const { assertFriends } = require("./friendService");
 const { deleteObjectByKey } = require("../lib/s3Media");
 
 const TableName = () => getTableName();
@@ -51,8 +52,10 @@ function messageToLegacy(item, viewerId) {
   })();
   const dto = {
     _id: item.messageId,
+    conversationId: item.conversationId,
     senderId: item.senderId,
     receiverId: item.receiverId,
+    isSystem: !!item.isSystem,
     isForwarded: !!item.isForwarded,
     isRecalled: recalled,
     isDeletedForMe: deletedForMe,
@@ -89,6 +92,179 @@ function messageToLegacy(item, viewerId) {
     }
   }
   return dto;
+}
+
+async function listConversationMessages(viewerId, conversationId) {
+  const res = await docClient.send(
+    new QueryCommand({
+      TableName: TableName(),
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :ms)",
+      ExpressionAttributeValues: {
+        ":pk": convPk(conversationId),
+        ":ms": "MSG#",
+      },
+      ScanIndexForward: false,
+    }),
+  );
+  const items = (res.Items || [])
+    .map((it) => messageToLegacy(it, viewerId))
+    .filter(Boolean);
+  items.reverse();
+  return items;
+}
+
+async function listConversationMemberUserIds(conversationId) {
+  const res = await docClient.send(
+    new QueryCommand({
+      TableName: TableName(),
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :msk)",
+      ExpressionAttributeValues: {
+        ":pk": convPk(conversationId),
+        ":msk": "MEMBER#",
+      },
+      ProjectionExpression: "userId",
+    }),
+  );
+  return (res.Items || [])
+    .map((it) => String(it.userId || ""))
+    .filter(Boolean);
+}
+
+async function sendConversationMessage({
+  conversationId,
+  senderId,
+  text,
+  imageUrl,
+  fileUrl,
+  images,
+  s3Key,
+  mimeType,
+  fileName,
+  sizeBytes,
+  isForwarded,
+  conversationType = "GROUP",
+  isSystem = false,
+}) {
+  const messageId = randomUUID();
+  const createdAt = new Date().toISOString();
+  const sk = messageSk(createdAt, messageId);
+
+  let type;
+  let mediaItems;
+  if (Array.isArray(images) && images.length > 0) {
+    type = "IMAGES";
+    mediaItems = images.map((img) => ({
+      s3Key: String(img.s3Key || ""),
+      publicUrl: String(img.fileUrl || ""),
+      fileName: String(img.fileName || "image"),
+      contentType: String(img.mimeType || "image/jpeg"),
+      sizeBytes: Number(img.sizeBytes ?? 0) || 0,
+    }));
+  } else {
+    const inferred = inferMessageTypeAndMediaItems({
+      text,
+      imageUrl,
+      fileUrl,
+      s3Key,
+      mimeType,
+      fileName,
+      sizeBytes,
+    });
+    type = inferred.type;
+    mediaItems = inferred.mediaItems;
+  }
+
+  const msgItem = {
+    PK: convPk(conversationId),
+    SK: sk,
+    GSI1PK: gsi1MessagePk(messageId),
+    GSI1SK: gsi1MessageSk(conversationId, createdAt, messageId),
+    entityType: "Message",
+    conversationId,
+    messageId,
+    createdAt,
+    senderId,
+    receiverId: undefined,
+    isSystem: !!isSystem,
+    type,
+    text: type === "TEXT" ? text || "" : text || undefined,
+    isForwarded: !!isForwarded,
+    recallScope: null,
+    editHistory: [],
+    reactionsByEmoji: {},
+    ...(mediaItems ? { mediaItems } : {}),
+  };
+
+  // Update conversation meta + write message atomically.
+  await docClient.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Update: {
+            TableName: TableName(),
+            Key: { PK: convPk(conversationId), SK: META_SK },
+            UpdateExpression: [
+              "SET lastMessageAt = :ts, lastMessageId = :mid, lastMessageSK = :msk",
+              ", conversationId = if_not_exists(conversationId, :cid)",
+              ", #tp = if_not_exists(#tp, :tp)",
+              ", createdAt = if_not_exists(createdAt, :ts)",
+              ", createdBy = if_not_exists(createdBy, :creator)",
+            ].join(" "),
+            ExpressionAttributeNames: { "#tp": "type" },
+            ExpressionAttributeValues: {
+              ":ts": createdAt,
+              ":mid": messageId,
+              ":msk": sk,
+              ":cid": conversationId,
+              ":tp": conversationType,
+              ":creator": senderId,
+            },
+          },
+        },
+        { Put: { TableName: TableName(), Item: msgItem } },
+      ],
+    }),
+  );
+
+  // Best-effort inbox updates for all members so the conversation bubbles to top.
+  let memberIds = [];
+  try {
+    memberIds = await listConversationMemberUserIds(conversationId);
+  } catch {
+    memberIds = [String(senderId)];
+  }
+  const g2sk = gsi2InboxSk(createdAt, conversationId);
+
+  await Promise.all(
+    memberIds.map((uid) =>
+      docClient.send(
+        new UpdateCommand({
+          TableName: TableName(),
+          Key: { PK: userPk(uid), SK: userConvSk(conversationId) },
+          UpdateExpression: [
+            "SET userId = :uid, conversationId = :cid, #tp = :tp",
+            ", lastMessageAt = :ts, lastMessageId = :mid, lastMessageSK = :msk",
+            ", GSI2PK = :g2pk, GSI2SK = :g2sk",
+            ", lastReadSK = if_not_exists(lastReadSK, :empty)",
+          ].join(" "),
+          ExpressionAttributeNames: { "#tp": "type" },
+          ExpressionAttributeValues: {
+            ":uid": uid,
+            ":cid": conversationId,
+            ":tp": conversationType,
+            ":ts": createdAt,
+            ":mid": messageId,
+            ":msk": sk,
+            ":g2pk": gsi2Pk(uid),
+            ":g2sk": g2sk,
+            ":empty": "",
+          },
+        }),
+      ),
+    ),
+  );
+
+  return messageToLegacy(msgItem, senderId);
 }
 
 function inferMessageTypeAndMediaItems({
@@ -148,6 +324,7 @@ function inferMessageTypeAndMediaItems({
 }
 
 async function listDirectMessages(viewerId, otherUserId) {
+  await assertFriends({ userIdA: viewerId, userIdB: otherUserId });
   const conversationId = dmConversationId(viewerId, otherUserId);
   const res = await docClient.send(
     new QueryCommand({
@@ -180,6 +357,7 @@ async function sendDirectMessage({
   sizeBytes,
   isForwarded,
 }) {
+  await assertFriends({ userIdA: senderId, userIdB: receiverId });
   const [sender, receiver] = await Promise.all([
     getProfileRaw(senderId),
     getProfileRaw(receiverId),
@@ -616,6 +794,8 @@ module.exports = {
   messageToLegacy,
   listDirectMessages,
   sendDirectMessage,
+  listConversationMessages,
+  sendConversationMessage,
   getMessageById,
   recallMessage,
   recallMessageMe,

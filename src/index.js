@@ -7,6 +7,8 @@ const cookieParser = require("cookie-parser");
 const messageRoutes = require("./routes/message.route");
 const mediaRoutes = require("./routes/media.route");
 const livekitRoutes = require("./routes/livekit.route");
+const conversationRoutes = require("./routes/conversation.route");
+const friendRoutes = require("./routes/friend.route");
 const cors = require("cors");
 const {app, server} = require("./lib/socket");
 
@@ -29,6 +31,8 @@ app.use(cors({
 
 app.use("/api/auth", authRoutes);
 app.use("/api/messages", messageRoutes);
+app.use("/api/conversations", conversationRoutes);
+app.use("/api/friends", friendRoutes);
 app.use("/api/media", mediaRoutes);
 app.use("/api/livekit", livekitRoutes);
 
