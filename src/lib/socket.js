@@ -52,10 +52,6 @@ io.on("connection", (socket) => {
   io.emit("getOnlineUsers", Object.keys(userSocketMap));
 
   // =========================
-  // 🔥 WEBRTC SIGNALING
-  // =========================
-
-  // =========================
   // 💬 TYPING INDICATOR
   // =========================
   socket.on("typing", ({ to } = {}) => {
@@ -72,51 +68,45 @@ io.on("connection", (socket) => {
     }
   });
 
-  // 📞 Gửi offer (gọi)
-  socket.on("callUser", ({ to, offer }) => {
+  // =========================
+  // 🎥 LIVEKIT CALL CONTROL (no SDP/ICE signaling)
+  // =========================
+  socket.on("callInvite", ({ to, roomName } = {}) => {
     const receiverSocketId = getReceiverSocketId(to);
-
     if (receiverSocketId) {
       io.to(receiverSocketId).emit("incomingCall", {
         from: userId,
-        offer,
+        roomName,
       });
     }
   });
 
-  // 📩 Gửi answer (trả lời)
-  socket.on("answerCall", ({ to, answer }) => {
+  socket.on("callAccept", ({ to, roomName } = {}) => {
     const receiverSocketId = getReceiverSocketId(to);
-
     if (receiverSocketId) {
-      io.to(receiverSocketId).emit("callAnswered", {
+      io.to(receiverSocketId).emit("callAccepted", {
         from: userId,
-        answer,
+        roomName,
       });
     }
-    console.log("📥 Received answer from", userId);
   });
 
-  // 🌐 ICE Candidate
-  socket.on("iceCandidate", ({ to, candidate }) => {
+  socket.on("callReject", ({ to, roomName } = {}) => {
     const receiverSocketId = getReceiverSocketId(to);
-
     if (receiverSocketId) {
-      io.to(receiverSocketId).emit("iceCandidate", {
+      io.to(receiverSocketId).emit("callRejected", {
         from: userId,
-        candidate,
+        roomName,
       });
-      console.log("📥 Received ICE candidate from", userId);
     }
   });
 
-  // 🔚 Hangup
-  socket.on("hangup", ({ to }) => {
+  socket.on("hangup", ({ to, roomName } = {}) => {
     const receiverSocketId = getReceiverSocketId(to);
-
     if (receiverSocketId) {
       io.to(receiverSocketId).emit("hangup", {
         from: userId,
+        roomName,
       });
     }
   });

@@ -6,6 +6,7 @@ const { connectDB } = require("./lib/db");
 const cookieParser = require("cookie-parser");
 const messageRoutes = require("./routes/message.route");
 const mediaRoutes = require("./routes/media.route");
+const livekitRoutes = require("./routes/livekit.route");
 const cors = require("cors");
 const {app, server} = require("./lib/socket");
 
@@ -29,6 +30,7 @@ app.use(cors({
 app.use("/api/auth", authRoutes);
 app.use("/api/messages", messageRoutes);
 app.use("/api/media", mediaRoutes);
+app.use("/api/livekit", livekitRoutes);
 
 server.listen(PORT, () => {
     console.log('Server is running on port:' + PORT);
