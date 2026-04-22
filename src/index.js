@@ -9,6 +9,7 @@ const mediaRoutes = require("./routes/media.route");
 const livekitRoutes = require("./routes/livekit.route");
 const conversationRoutes = require("./routes/conversation.route");
 const friendRoutes = require("./routes/friend.route");
+const aiRoutes = require("./routes/ai.route");
 const cors = require("cors");
 const {app, server} = require("./lib/socket");
 
@@ -42,6 +43,7 @@ app.use("/api/conversations", conversationRoutes);
 app.use("/api/friends", friendRoutes);
 app.use("/api/media", mediaRoutes);
 app.use("/api/livekit", livekitRoutes);
+app.use("/api/ai", aiRoutes);
 
 server.listen(PORT, () => {
     console.log('Server is running on port:' + PORT);
