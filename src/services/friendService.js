@@ -18,3 +18,14 @@ function freqOutSk(otherUserId) {
 function freqInSk(otherUserId) {
   return `FREQ_IN#${otherUserId}`;
 }
+
+async function getFriendLink({ userId, otherUserId }) {
+  const res = await docClient.send(
+    new GetCommand({
+      TableName: TableName(),
+      Key: { PK: `USER#${userId}`, SK: friendSk(otherUserId) },
+    }),
+  );
+  return res.Item || null;
+}
+
