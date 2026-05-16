@@ -29,3 +29,14 @@ async function getFriendLink({ userId, otherUserId }) {
   return res.Item || null;
 }
 
+async function assertFriends({ userIdA, userIdB }) {
+  const link = await getFriendLink({ userId: userIdA, otherUserId: userIdB });
+  if (!link) {
+    const err = new Error("NOT_FRIENDS");
+    err.code = "NOT_FRIENDS";
+    throw err;
+  }
+  return link;
+}
+
+
