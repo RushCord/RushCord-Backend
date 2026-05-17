@@ -50,5 +50,23 @@ async function getFriendRequest({ userId, otherUserId, direction }) {
   return res.Item || null;
 }
 
+async function listFriends(userId) {
+  const res = await docClient.send(
+    new QueryCommand({
+      TableName: TableName(),
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :p)",
+      ExpressionAttributeValues: {
+        ":pk": `USER#${userId}`,
+        ":p": "FRIEND#",
+      },
+    }),
+  );
+  return (res.Items || []).map((it) => ({
+    otherUserId: it.otherUserId,
+    createdAt: it.createdAt,
+  }));
+}
+
+
 
 
