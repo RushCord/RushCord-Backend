@@ -67,6 +67,27 @@ async function listFriends(userId) {
   }));
 }
 
+async function listFriendRequests(userId, type) {
+  const prefix = type === "outgoing" ? "FREQ_OUT#" : "FREQ_IN#";
+  const res = await docClient.send(
+    new QueryCommand({
+      TableName: TableName(),
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :p)",
+      ExpressionAttributeValues: {
+        ":pk": `USER#${userId}`,
+        ":p": prefix,
+      },
+    }),
+  );
+  return (res.Items || []).map((it) => ({
+    otherUserId: it.otherUserId,
+    direction: it.direction,
+    status: it.status,
+    createdAt: it.createdAt,
+  }));
+}
+
+
 
 
 
