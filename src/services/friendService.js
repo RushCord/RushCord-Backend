@@ -39,4 +39,16 @@ async function assertFriends({ userIdA, userIdB }) {
   return link;
 }
 
+async function getFriendRequest({ userId, otherUserId, direction }) {
+  const sk = direction === "IN" ? freqInSk(otherUserId) : freqOutSk(otherUserId);
+  const res = await docClient.send(
+    new GetCommand({
+      TableName: TableName(),
+      Key: { PK: `USER#${userId}`, SK: sk },
+    }),
+  );
+  return res.Item || null;
+}
+
+
 
