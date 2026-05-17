@@ -87,6 +87,23 @@ async function listFriendRequests(userId, type) {
   }));
 }
 
+async function sendFriendRequest({ userId, otherUserId }) {
+  const from = String(userId || "");
+  const to = String(otherUserId || "");
+
+  if (!from || !to) {
+    const err = new Error("INVALID_USER");
+    err.code = "INVALID_USER";
+    throw err;
+  }
+  if (from === to) {
+    const err = new Error("CANNOT_FRIEND_SELF");
+    err.code = "CANNOT_FRIEND_SELF";
+    throw err;
+  }
+}
+
+
 
 
 
