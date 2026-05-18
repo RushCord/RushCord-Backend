@@ -250,6 +250,34 @@ async function acceptFriendRequest({ userId, otherUserId }) {
   return { otherUserId: other, status: "ACCEPTED", createdAt };
 }
 
+async function deleteFriendRequest({ userId, otherUserId }) {
+  const me = String(userId || "");
+  const other = String(otherUserId || "");
+
+  if (!me || !other) {
+    const err = new Error("INVALID_USER");
+    err.code = "INVALID_USER";
+    throw err;
+  }
+  if (me === other) {
+    const err = new Error("CANNOT_FRIEND_SELF");
+    err.code = "CANNOT_FRIEND_SELF";
+    throw err;
+  }
+
+  const [incoming, outgoing] = await Promise.all([
+    getFriendRequest({ userId: me, otherUserId: other, direction: "IN" }),
+    getFriendRequest({ userId: me, otherUserId: other, direction: "OUT" }),
+  ]);
+
+  if (!incoming && !outgoing) {
+    const err = new Error("FRIEND_REQUEST_NOT_FOUND");
+    err.code = "FRIEND_REQUEST_NOT_FOUND";
+    throw err;
+  }
+}
+
+
 
 
 
