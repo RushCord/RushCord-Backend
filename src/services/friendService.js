@@ -198,7 +198,58 @@ async function acceptFriendRequest({ userId, otherUserId }) {
     err.code = "FRIEND_REQUEST_NOT_FOUND";
     throw err;
   }
+
+  const createdAt = new Date().toISOString();
+  await docClient.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Delete: {
+            TableName: TableName(),
+            Key: { PK: `USER#${me}`, SK: freqInSk(other) },
+          },
+        },
+        {
+          Delete: {
+            TableName: TableName(),
+            Key: { PK: `USER#${other}`, SK: freqOutSk(me) },
+          },
+        },
+        {
+          Put: {
+            TableName: TableName(),
+            Item: {
+              PK: `USER#${me}`,
+              SK: friendSk(other),
+              entityType: "Friend",
+              userId: me,
+              otherUserId: other,
+              status: "ACCEPTED",
+              createdAt,
+            },
+          },
+        },
+        {
+          Put: {
+            TableName: TableName(),
+            Item: {
+              PK: `USER#${other}`,
+              SK: friendSk(me),
+              entityType: "Friend",
+              userId: other,
+              otherUserId: me,
+              status: "ACCEPTED",
+              createdAt,
+            },
+          },
+        },
+      ],
+    }),
+  );
+
+  return { otherUserId: other, status: "ACCEPTED", createdAt };
 }
+
 
 
 
