@@ -315,6 +315,49 @@ async function deleteFriendRequest({ userId, otherUserId }) {
   return { otherUserId: other, deleted: true };
 }
 
+async function unfriend({ userId, otherUserId }) {
+  const me = String(userId || "");
+  const other = String(otherUserId || "");
+  if (!me || !other) {
+    const err = new Error("INVALID_USER");
+    err.code = "INVALID_USER";
+    throw err;
+  }
+  if (me === other) {
+    const err = new Error("CANNOT_UNFRIEND_SELF");
+    err.code = "CANNOT_UNFRIEND_SELF";
+    throw err;
+  }
+
+  const [a, b] = await Promise.all([
+    getFriendLink({ userId: me, otherUserId: other }),
+    getFriendLink({ userId: other, otherUserId: me }),
+  ]);
+  if (!a && !b) return { otherUserId: other, deleted: true };
+
+  await docClient.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Delete: {
+            TableName: TableName(),
+            Key: { PK: `USER#${me}`, SK: friendSk(other) },
+          },
+        },
+        {
+          Delete: {
+            TableName: TableName(),
+            Key: { PK: `USER#${other}`, SK: friendSk(me) },
+          },
+        },
+      ],
+    }),
+  );
+
+  return { otherUserId: other, deleted: true };
+}
+
+
 
 
 
