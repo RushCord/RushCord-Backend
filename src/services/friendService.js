@@ -130,7 +130,49 @@ async function sendFriendRequest({ userId, otherUserId }) {
     err.code = "FRIEND_REQUEST_EXISTS";
     throw err;
   }
+
+  const createdAt = new Date().toISOString();
+
+  await docClient.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Put: {
+            TableName: TableName(),
+            Item: {
+              PK: `USER#${from}`,
+              SK: freqOutSk(to),
+              entityType: "FriendRequest",
+              userId: from,
+              otherUserId: to,
+              direction: "OUT",
+              status: "PENDING",
+              createdAt,
+            },
+          },
+        },
+        {
+          Put: {
+            TableName: TableName(),
+            Item: {
+              PK: `USER#${to}`,
+              SK: freqInSk(from),
+              entityType: "FriendRequest",
+              userId: to,
+              otherUserId: from,
+              direction: "IN",
+              status: "PENDING",
+              createdAt,
+            },
+          },
+        },
+      ],
+    }),
+  );
+
+  return { otherUserId: to, status: "PENDING", createdAt };
 }
+
 
 
 
