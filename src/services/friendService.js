@@ -275,7 +275,46 @@ async function deleteFriendRequest({ userId, otherUserId }) {
     err.code = "FRIEND_REQUEST_NOT_FOUND";
     throw err;
   }
+
+  // Determine counterpart keys to delete both sides.
+  const transact = [];
+  if (incoming) {
+    transact.push({
+      Delete: {
+        TableName: TableName(),
+        Key: { PK: `USER#${me}`, SK: freqInSk(other) },
+      },
+    });
+    transact.push({
+      Delete: {
+        TableName: TableName(),
+        Key: { PK: `USER#${other}`, SK: freqOutSk(me) },
+      },
+    });
+  } else if (outgoing) {
+    transact.push({
+      Delete: {
+        TableName: TableName(),
+        Key: { PK: `USER#${me}`, SK: freqOutSk(other) },
+      },
+    });
+    transact.push({
+      Delete: {
+        TableName: TableName(),
+        Key: { PK: `USER#${other}`, SK: freqInSk(me) },
+      },
+    });
+  }
+
+  await docClient.send(
+    new TransactWriteCommand({
+      TransactItems: transact,
+    }),
+  );
+
+  return { otherUserId: other, deleted: true };
 }
+
 
 
 
