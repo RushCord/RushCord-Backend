@@ -101,7 +101,37 @@ async function sendFriendRequest({ userId, otherUserId }) {
     err.code = "CANNOT_FRIEND_SELF";
     throw err;
   }
+
+  const [existingFriend, outReq, inReq] = await Promise.all([
+    getFriendLink({ userId: from, otherUserId: to }),
+    getFriendRequest({ userId: from, otherUserId: to, direction: "OUT" }),
+    getFriendRequest({ userId: from, otherUserId: to, direction: "IN" }),
+  ]);
+
+  if (existingFriend) {
+    const err = new Error("ALREADY_FRIENDS");
+    err.code = "ALREADY_FRIENDS";
+    throw err;
+  }
+  if (outReq || inReq) {
+    const err = new Error("FRIEND_REQUEST_EXISTS");
+    err.code = "FRIEND_REQUEST_EXISTS";
+    throw err;
+  }
+
+  // If the other user already sent you a request, accept should be used instead.
+  const otherOutToMe = await getFriendRequest({
+    userId: to,
+    otherUserId: from,
+    direction: "OUT",
+  });
+  if (otherOutToMe) {
+    const err = new Error("FRIEND_REQUEST_EXISTS");
+    err.code = "FRIEND_REQUEST_EXISTS";
+    throw err;
+  }
 }
+
 
 
 
