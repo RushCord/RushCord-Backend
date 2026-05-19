@@ -48,3 +48,32 @@ async function getFriendRequests(req, res) {
   }
 }
 
+async function postFriendRequest(req, res) {
+  try {
+    const userId = req.user._id;
+    const otherUserId = req.body?.otherUserId;
+    const out = await sendFriendRequest({ userId, otherUserId });
+    return res.status(201).json(out);
+  } catch (e) {
+    const mapped = mapServiceError(res, e);
+    if (mapped) return mapped;
+    console.error("postFriendRequest error:", e?.message || e);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+async function acceptRequest(req, res) {
+  try {
+    const userId = req.user._id;
+    const otherUserId = req.params.otherUserId;
+    const out = await acceptFriendRequest({ userId, otherUserId });
+    return res.json(out);
+  } catch (e) {
+    const mapped = mapServiceError(res, e);
+    if (mapped) return mapped;
+    console.error("acceptRequest error:", e?.message || e);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+
