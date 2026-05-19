@@ -357,6 +357,21 @@ async function unfriend({ userId, otherUserId }) {
   return { otherUserId: other, deleted: true };
 }
 
+module.exports = {
+  friendSk,
+  freqOutSk,
+  freqInSk,
+  getFriendLink,
+  assertFriends,
+  listFriends,
+  listFriendRequests,
+  sendFriendRequest,
+  acceptFriendRequest,
+  deleteFriendRequest,
+  unfriend,
+};
+
+
 
 
 
