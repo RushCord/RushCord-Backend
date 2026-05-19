@@ -76,4 +76,40 @@ async function acceptRequest(req, res) {
   }
 }
 
+async function deleteRequest(req, res) {
+  try {
+    const userId = req.user._id;
+    const otherUserId = req.params.otherUserId;
+    const out = await deleteFriendRequest({ userId, otherUserId });
+    return res.json(out);
+  } catch (e) {
+    const mapped = mapServiceError(res, e);
+    if (mapped) return mapped;
+    console.error("deleteRequest error:", e?.message || e);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+async function deleteFriend(req, res) {
+  try {
+    const userId = req.user._id;
+    const otherUserId = req.params.otherUserId;
+    const out = await unfriend({ userId, otherUserId });
+    return res.json(out);
+  } catch (e) {
+    console.error("deleteFriend error:", e?.message || e);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+module.exports = {
+  getFriends,
+  getFriendRequests,
+  postFriendRequest,
+  acceptRequest,
+  deleteRequest,
+  deleteFriend,
+};
+
+
 
