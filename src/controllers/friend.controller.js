@@ -23,3 +23,28 @@ function mapServiceError(res, e) {
   }
   return null;
 }
+
+async function getFriends(req, res) {
+  try {
+    const userId = req.user._id;
+    const items = await listFriends(userId);
+    return res.json(items);
+  } catch (e) {
+    console.error("getFriends error:", e?.message || e);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+async function getFriendRequests(req, res) {
+  try {
+    const userId = req.user._id;
+    const typeRaw = String(req.query.type || "incoming").toLowerCase();
+    const type = typeRaw === "outgoing" ? "outgoing" : "incoming";
+    const items = await listFriendRequests(userId, type);
+    return res.json(items);
+  } catch (e) {
+    console.error("getFriendRequests error:", e?.message || e);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
