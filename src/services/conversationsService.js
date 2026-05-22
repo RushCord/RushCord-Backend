@@ -3,12 +3,22 @@ const {
   GetCommand,
   PutCommand,
   QueryCommand,
+  ScanCommand,
   TransactWriteCommand,
   UpdateCommand,
 } = require("@aws-sdk/lib-dynamodb");
 const { docClient, getTableName } = require("../lib/dynamodb");
 const { convPk, META_SK, memberSk, userPk, userConvSk, gsi2Pk, gsi2InboxSk } = require("../lib/keys");
 const { getProfileRaw } = require("./userService");
+const { seedDefaultChannelsForNewGroup, listChannels } = require("./channelsService");
+const { listConversationMessages } = require("./messageService");
+const {
+  assertAllowedTopic,
+  isAllowedTopicId,
+  normalizeGroupDescription,
+} = require("../constants/groupTopics");
+const { getConversationMember } = require("./conversationService");
+const { getEffectiveJoinPolicy } = require("../constants/groupJoinPolicy");
 
 const TableName = () => getTableName();
 
@@ -20,6 +30,14 @@ function toConversationDto({ meta, inbox, lastMessage }) {
     type,
     title: type === "GROUP" ? meta?.title || "" : meta?.title, // DM title optional
     avatar: meta?.avatar || "",
+    cover: meta?.cover || "",
+    ...(type === "GROUP"
+      ? {
+          topic: meta?.topic || "",
+          description: meta?.description || "",
+          joinPolicy: getEffectiveJoinPolicy(meta),
+        }
+      : {}),
     createdAt: meta?.createdAt,
     createdBy: meta?.createdBy,
     memberCount: meta?.memberCount,
@@ -76,13 +94,23 @@ async function getMessageBySk({ conversationId, messageSk }) {
   return res.Item || null;
 }
 
-async function createGroupConversation({ creatorId, title, memberIds }) {
+async function createGroupConversation({
+  creatorId,
+  title,
+  memberIds,
+  topic,
+  description,
+  avatar,
+  cover,
+}) {
   const trimmedTitle = typeof title === "string" ? title.trim() : "";
   if (!trimmedTitle) {
     const err = new Error("INVALID_TITLE");
     err.code = "INVALID_TITLE";
     throw err;
   }
+  const topicId = assertAllowedTopic(topic);
+  const descriptionText = normalizeGroupDescription(description);
   const inputMembers = Array.isArray(memberIds) ? memberIds : [];
   const allMembers = Array.from(new Set([String(creatorId), ...inputMembers.map(String)])).filter(Boolean);
   if (allMembers.length < 2) {
@@ -114,13 +142,17 @@ async function createGroupConversation({ creatorId, title, memberIds }) {
     conversationId,
     type: "GROUP",
     title: trimmedTitle,
-    avatar: "",
+    topic: topicId,
+    description: descriptionText,
+    avatar: typeof avatar === "string" ? avatar.trim() : "",
+    cover: typeof cover === "string" ? cover.trim() : "",
     createdAt: now,
     createdBy: String(creatorId),
     lastMessageAt: now,
     lastMessageId: "",
     lastMessageSK: "",
     memberCount: allMembers.length,
+    joinPolicy: "OPEN",
   };
 
   const transactItems = [];
@@ -182,6 +214,11 @@ async function createGroupConversation({ creatorId, title, memberIds }) {
     }),
   );
 
+  await seedDefaultChannelsForNewGroup({
+    conversationId,
+    createdBy: String(creatorId),
+  });
+
   return metaItem;
 }
 
@@ -225,6 +262,8 @@ async function updateGroupConversationMeta({
   conversationId,
   title,
   avatar,
+  cover,
+  joinPolicy,
 }) {
   const meta = await getConversationMeta(conversationId);
   if (!meta) {
@@ -248,8 +287,19 @@ async function updateGroupConversationMeta({
 
   const nextAvatar =
     avatar === undefined ? undefined : String(avatar || "").trim();
+  const nextCover =
+    cover === undefined ? undefined : String(cover || "").trim();
+  const nextJoinPolicy =
+    joinPolicy === undefined
+      ? undefined
+      : getEffectiveJoinPolicy({ joinPolicy });
 
-  if (nextTitle === undefined && nextAvatar === undefined) {
+  if (
+    nextTitle === undefined &&
+    nextAvatar === undefined &&
+    nextCover === undefined &&
+    nextJoinPolicy === undefined
+  ) {
     return meta;
   }
 
@@ -266,20 +316,57 @@ async function updateGroupConversationMeta({
     names["#a"] = "avatar";
     values[":a"] = nextAvatar;
   }
+  if (nextCover !== undefined) {
+    sets.push("#c = :c");
+    names["#c"] = "cover";
+    values[":c"] = nextCover;
+  }
+  if (nextJoinPolicy !== undefined) {
+    sets.push("joinPolicy = :jp");
+    values[":jp"] = nextJoinPolicy;
+  }
   sets.push("updatedAt = :u");
   values[":u"] = new Date().toISOString();
 
-  await docClient.send(
-    new UpdateCommand({
-      TableName: TableName(),
-      Key: { PK: convPk(conversationId), SK: META_SK },
-      UpdateExpression: `SET ${sets.join(", ")}`,
-      ExpressionAttributeNames: names,
-      ExpressionAttributeValues: values,
-    }),
-  );
+  const updateParams = {
+    TableName: TableName(),
+    Key: { PK: convPk(conversationId), SK: META_SK },
+    UpdateExpression: `SET ${sets.join(", ")}`,
+    ExpressionAttributeValues: values,
+  };
+  if (Object.keys(names).length > 0) {
+    updateParams.ExpressionAttributeNames = names;
+  }
+  await docClient.send(new UpdateCommand(updateParams));
 
   return (await getConversationMeta(conversationId)) || meta;
+}
+
+function effectiveAdminGrantedAt(member) {
+  const raw =
+    member?.adminGrantedAt || member?.updatedAt || member?.joinedAt || "";
+  return String(raw);
+}
+
+function pickLongestTenuredAdmin(members) {
+  const admins = (Array.isArray(members) ? members : [])
+    .filter((m) => String(m.role || "").toUpperCase() === "ADMIN")
+    .filter((m) => {
+      const st = String(m.status || "ACCEPTED").toUpperCase();
+      return st === "ACCEPTED";
+    });
+  if (admins.length === 0) {
+    const err = new Error("NO_ELIGIBLE_SUCCESSOR");
+    err.code = "NO_ELIGIBLE_SUCCESSOR";
+    throw err;
+  }
+  admins.sort((a, b) => {
+    const ta = effectiveAdminGrantedAt(a);
+    const tb = effectiveAdminGrantedAt(b);
+    if (ta !== tb) return ta.localeCompare(tb);
+    return String(a.userId).localeCompare(String(b.userId));
+  });
+  return admins[0];
 }
 
 async function updateConversationMemberRole({ conversationId, userId, nextRole }) {
@@ -290,17 +377,91 @@ async function updateConversationMemberRole({ conversationId, userId, nextRole }
     throw err;
   }
   const updatedAt = new Date().toISOString();
+  const adminGrantedAt = updatedAt;
+  const updateExpression =
+    role === "ADMIN"
+      ? "SET #r = :r, updatedAt = :u, adminGrantedAt = :aga"
+      : "SET #r = :r, updatedAt = :u REMOVE adminGrantedAt";
+  const expressionAttributeValues =
+    role === "ADMIN"
+      ? { ":r": role, ":u": updatedAt, ":aga": adminGrantedAt }
+      : { ":r": role, ":u": updatedAt };
+
   await docClient.send(
     new UpdateCommand({
       TableName: TableName(),
       Key: { PK: convPk(conversationId), SK: memberSk(userId) },
-      UpdateExpression: "SET #r = :r, updatedAt = :u",
+      UpdateExpression: updateExpression,
       ExpressionAttributeNames: { "#r": "role" },
-      ExpressionAttributeValues: { ":r": role, ":u": updatedAt },
+      ExpressionAttributeValues: expressionAttributeValues,
       ConditionExpression: "attribute_exists(PK)",
     }),
   );
-  return { userId, role, updatedAt };
+  return role === "ADMIN"
+    ? { userId, role, updatedAt, adminGrantedAt }
+    : { userId, role, updatedAt };
+}
+
+async function leaveGroupAsOwner({ conversationId, userId }) {
+  const members = await listConversationMembers(conversationId);
+  const ownerMember = members.find((m) => String(m.userId) === String(userId));
+  if (!ownerMember || String(ownerMember.role || "").toUpperCase() !== "OWNER") {
+    const err = new Error("NOT_OWNER");
+    err.code = "NOT_OWNER";
+    throw err;
+  }
+
+  const successor = pickLongestTenuredAdmin(members);
+  const successorId = String(successor.userId);
+  const now = new Date().toISOString();
+
+  await docClient.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        {
+          Update: {
+            TableName: TableName(),
+            Key: { PK: convPk(conversationId), SK: memberSk(successorId) },
+            UpdateExpression: "SET #r = :r, updatedAt = :u REMOVE adminGrantedAt",
+            ExpressionAttributeNames: { "#r": "role" },
+            ExpressionAttributeValues: { ":r": "OWNER", ":u": now },
+            ConditionExpression: "attribute_exists(PK)",
+          },
+        },
+        {
+          Delete: {
+            TableName: TableName(),
+            Key: { PK: convPk(conversationId), SK: memberSk(userId) },
+          },
+        },
+        {
+          Delete: {
+            TableName: TableName(),
+            Key: { PK: userPk(userId), SK: userConvSk(conversationId) },
+          },
+        },
+        {
+          Update: {
+            TableName: TableName(),
+            Key: { PK: convPk(conversationId), SK: META_SK },
+            UpdateExpression: "SET updatedAt = :u ADD memberCount :negOne",
+            ExpressionAttributeValues: {
+              ":u": now,
+              ":negOne": -1,
+            },
+          },
+        },
+      ],
+    }),
+  );
+
+  return {
+    userId: String(userId),
+    removed: true,
+    updatedAt: now,
+    newOwnerId: successorId,
+    newOwnerFullName: successor.fullName || successorId,
+  };
 }
 
 async function removeConversationMember({ conversationId, userId }) {
@@ -469,6 +630,174 @@ async function deleteConversationPartition({ conversationId }) {
   } while (ExclusiveStartKey);
 }
 
+function toPublicGroupExplore(meta, isMember) {
+  if (!meta || meta.type !== "GROUP") return null;
+  return {
+    conversationId: meta.conversationId,
+    title: meta.title || "",
+    topic: meta.topic || "",
+    description: meta.description || "",
+    avatar: meta.avatar || "",
+    cover: meta.cover || "",
+    memberCount: meta.memberCount ?? 0,
+    createdAt: meta.createdAt || null,
+    isMember: Boolean(isMember),
+  };
+}
+
+async function listAllGroupMetas() {
+  const out = [];
+  let ExclusiveStartKey;
+  do {
+    const res = await docClient.send(
+      new ScanCommand({
+        TableName: TableName(),
+        FilterExpression: "SK = :meta AND #t = :group",
+        ExpressionAttributeNames: { "#t": "type" },
+        ExpressionAttributeValues: {
+          ":meta": META_SK,
+          ":group": "GROUP",
+        },
+        ExclusiveStartKey,
+      }),
+    );
+    for (const item of res.Items || []) {
+      if (item.entityType === "ConversationMeta" || item.conversationId) {
+        out.push(item);
+      }
+    }
+    ExclusiveStartKey = res.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return out;
+}
+
+async function searchGroupsForExplore(viewerId, query, topic, limit = 40) {
+  const cap = Math.min(80, Math.max(1, Number(limit) || 40));
+  const topicId = typeof topic === "string" ? topic.trim() : "";
+  if (topicId && !isAllowedTopicId(topicId)) {
+    const err = new Error("INVALID_TOPIC");
+    err.code = "INVALID_TOPIC";
+    throw err;
+  }
+
+  const needle = String(query || "").trim().toLowerCase();
+  const userGroups = await listUserConversations({ userId: viewerId, limit: 100 });
+  const memberIds = new Set(
+    userGroups.filter((c) => c?.type === "GROUP").map((c) => String(c.conversationId)),
+  );
+
+  let groups = await listAllGroupMetas();
+  groups = groups.filter((g) => getEffectiveJoinPolicy(g) !== "INVITE_ONLY");
+  if (topicId) {
+    groups = groups.filter((g) => String(g.topic || "") === topicId);
+  }
+  if (needle) {
+    groups = groups.filter((g) => {
+      const title = String(g.title || "").toLowerCase();
+      const desc = String(g.description || "").toLowerCase();
+      return title.includes(needle) || desc.includes(needle);
+    });
+  }
+
+  return groups
+    .map((meta) => toPublicGroupExplore(meta, memberIds.has(String(meta.conversationId))))
+    .filter(Boolean)
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .slice(0, cap);
+}
+
+const EXPLORE_PREVIEW_MESSAGE_LIMIT = 50;
+
+async function getGroupExplorePreview(viewerId, conversationId) {
+  const cid = String(conversationId || "").trim();
+  const meta = await getConversationMeta(cid);
+  if (!meta) {
+    const err = new Error("CONVERSATION_NOT_FOUND");
+    err.code = "CONVERSATION_NOT_FOUND";
+    throw err;
+  }
+  if (meta.type !== "GROUP") {
+    const err = new Error("NOT_A_GROUP");
+    err.code = "NOT_A_GROUP";
+    throw err;
+  }
+  if (getEffectiveJoinPolicy(meta) === "INVITE_ONLY") {
+    const err = new Error("GROUP_NOT_DISCOVERABLE");
+    err.code = "GROUP_NOT_DISCOVERABLE";
+    throw err;
+  }
+
+  const member = await getConversationMember({ conversationId: cid, userId: viewerId });
+  const isMember = Boolean(member);
+
+  const channels = await listChannels({
+    conversationId: cid,
+    userId: viewerId,
+  });
+  const infoChannels = channels.filter((c) => c.channelType === "INFO");
+
+  const infoWithMessages = await Promise.all(
+    infoChannels.map(async (ch) => {
+      const messages = await listConversationMessages(
+        viewerId,
+        cid,
+        ch.channelId,
+        { limit: EXPLORE_PREVIEW_MESSAGE_LIMIT },
+      );
+      return {
+        channelId: ch.channelId,
+        name: ch.name,
+        messages,
+      };
+    }),
+  );
+
+  return {
+    conversationId: cid,
+    title: meta.title || "",
+    description: meta.description || "",
+    avatar: meta.avatar || "",
+    cover: meta.cover || "",
+    topic: meta.topic || "",
+    memberCount: meta.memberCount ?? 0,
+    createdAt: meta.createdAt || null,
+    isMember,
+    infoChannels: infoWithMessages,
+  };
+}
+
+async function joinGroupConversation({ conversationId, userId }) {
+  const meta = await getConversationMeta(conversationId);
+  if (!meta) {
+    const err = new Error("CONVERSATION_NOT_FOUND");
+    err.code = "CONVERSATION_NOT_FOUND";
+    throw err;
+  }
+  if (meta.type !== "GROUP") {
+    const err = new Error("NOT_A_GROUP");
+    err.code = "NOT_A_GROUP";
+    throw err;
+  }
+  if (getEffectiveJoinPolicy(meta) === "INVITE_ONLY") {
+    const err = new Error("INVITE_ONLY_GROUP");
+    err.code = "INVITE_ONLY_GROUP";
+    throw err;
+  }
+
+  const existing = await getConversationMember({ conversationId, userId });
+  if (existing) {
+    return {
+      userId: String(userId),
+      fullName: existing.fullName,
+      role: existing.role,
+      joinedAt: existing.joinedAt,
+      alreadyMember: true,
+    };
+  }
+  const out = await addConversationMember({ conversationId, userId });
+  return { ...out, alreadyMember: false };
+}
+
 async function dissolveGroupConversation({ conversationId }) {
   const meta = await getConversationMeta(conversationId);
   if (!meta) {
@@ -502,7 +831,13 @@ module.exports = {
   updateGroupConversationMeta,
   updateConversationMemberRole,
   removeConversationMember,
+  leaveGroupAsOwner,
+  effectiveAdminGrantedAt,
+  pickLongestTenuredAdmin,
   addConversationMember,
+  searchGroupsForExplore,
+  getGroupExplorePreview,
+  joinGroupConversation,
   dissolveGroupConversation,
 };
 

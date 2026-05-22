@@ -1,5 +1,7 @@
 const { randomUUID } = require("crypto");
 const {
+  BatchWriteCommand,
+  GetCommand,
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
@@ -7,18 +9,25 @@ const {
 const { docClient, getTableName } = require("../lib/dynamodb");
 const {
   userPk,
-  PROFILE_SK,
   convPk,
   META_SK,
   memberSk,
   userConvSk,
   dmConversationId,
   messageSk,
+  channelMessageSk,
+  channelMessageSkPrefix,
   gsi1MessagePk,
   gsi1MessageSk,
+  gsi1MessageSkForRow,
   gsi2Pk,
   gsi2InboxSk,
 } = require("../lib/keys");
+const {
+  getChannelById,
+  getDefaultChatChannelIdForGroup,
+  listChannels,
+} = require("./channelsService");
 const { getProfileRaw } = require("./userService");
 const { assertFriends } = require("./friendService");
 const { deleteObjectByKey } = require("../lib/s3Media");
@@ -53,6 +62,7 @@ function messageToLegacy(item, viewerId) {
   const dto = {
     _id: item.messageId,
     conversationId: item.conversationId,
+    channelId: item.channelId ? String(item.channelId) : undefined,
     senderId: item.senderId,
     receiverId: item.receiverId,
     isSystem: !!item.isSystem,
@@ -94,22 +104,72 @@ function messageToLegacy(item, viewerId) {
   return dto;
 }
 
-async function listConversationMessages(viewerId, conversationId) {
-  const res = await docClient.send(
-    new QueryCommand({
-      TableName: TableName(),
-      KeyConditionExpression: "PK = :pk AND begins_with(SK, :ms)",
-      ExpressionAttributeValues: {
-        ":pk": convPk(conversationId),
-        ":ms": "MSG#",
-      },
-      ScanIndexForward: false,
-    }),
-  );
-  const items = (res.Items || [])
+async function listConversationMessages(viewerId, conversationId, channelId, options = {}) {
+  const limit =
+    options?.limit != null ? Math.min(100, Math.max(1, Number(options.limit) || 50)) : undefined;
+
+  if (String(conversationId || "").startsWith("DM#")) {
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: TableName(),
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :ms)",
+        ExpressionAttributeValues: {
+          ":pk": convPk(conversationId),
+          ":ms": "MSG#",
+        },
+        ScanIndexForward: false,
+        ...(limit ? { Limit: limit } : {}),
+      }),
+    );
+    const items = (res.Items || [])
+      .map((it) => messageToLegacy(it, viewerId))
+      .filter(Boolean);
+    items.reverse();
+    return items;
+  }
+
+  let rows;
+  if (channelId) {
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: TableName(),
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :ms)",
+        ExpressionAttributeValues: {
+          ":pk": convPk(conversationId),
+          ":ms": channelMessageSkPrefix(channelId),
+        },
+        ScanIndexForward: false,
+        ...(limit ? { Limit: limit } : {}),
+      }),
+    );
+    rows = res.Items || [];
+  } else {
+    const defaultChat = await getDefaultChatChannelIdForGroup(conversationId);
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: TableName(),
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :ms)",
+        ExpressionAttributeValues: {
+          ":pk": convPk(conversationId),
+          ":ms": "MSG#",
+        },
+        ScanIndexForward: false,
+        ...(limit ? { Limit: limit } : {}),
+      }),
+    );
+    rows = (res.Items || []).filter((it) => {
+      const sk = String(it.SK || "");
+      if (sk.startsWith("MSG#CH#")) {
+        return defaultChat && sk.startsWith(channelMessageSkPrefix(defaultChat));
+      }
+      return true;
+    });
+  }
+
+  const items = rows
     .map((it) => messageToLegacy(it, viewerId))
     .filter(Boolean);
-  items.reverse();
+  items.sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
   return items;
 }
 
@@ -144,10 +204,39 @@ async function sendConversationMessage({
   isForwarded,
   conversationType = "GROUP",
   isSystem = false,
+  channelId: channelIdArg,
 }) {
+  const isGroupConv = String(conversationId || "").startsWith("GROUP#");
+
+  let channelId = channelIdArg;
+  if (isGroupConv) {
+    if (!channelId && isSystem) {
+      channelId = await getDefaultChatChannelIdForGroup(conversationId);
+    }
+    if (!channelId) {
+      const err = new Error("CHANNEL_REQUIRED");
+      err.code = "CHANNEL_REQUIRED";
+      throw err;
+    }
+    const ch = await getChannelById(conversationId, channelId);
+    if (!ch) {
+      const err = new Error("CHANNEL_NOT_FOUND");
+      err.code = "CHANNEL_NOT_FOUND";
+      throw err;
+    }
+    if (ch.channelType === "VOICE") {
+      const err = new Error("CANNOT_MESSAGE_VOICE");
+      err.code = "CANNOT_MESSAGE_VOICE";
+      throw err;
+    }
+  }
+
   const messageId = randomUUID();
   const createdAt = new Date().toISOString();
-  const sk = messageSk(createdAt, messageId);
+  const sk =
+    isGroupConv && channelId
+      ? channelMessageSk(channelId, createdAt, messageId)
+      : messageSk(createdAt, messageId);
 
   let type;
   let mediaItems;
@@ -174,11 +263,15 @@ async function sendConversationMessage({
     mediaItems = inferred.mediaItems;
   }
 
+  const gsi1SK = isGroupConv
+    ? gsi1MessageSkForRow(conversationId, sk)
+    : gsi1MessageSk(conversationId, createdAt, messageId);
+
   const msgItem = {
     PK: convPk(conversationId),
     SK: sk,
     GSI1PK: gsi1MessagePk(messageId),
-    GSI1SK: gsi1MessageSk(conversationId, createdAt, messageId),
+    GSI1SK: gsi1SK,
     entityType: "Message",
     conversationId,
     messageId,
@@ -192,6 +285,7 @@ async function sendConversationMessage({
     recallScope: null,
     editHistory: [],
     reactionsByEmoji: {},
+    ...(isGroupConv && channelId ? { channelId: String(channelId) } : {}),
     ...(mediaItems ? { mediaItems } : {}),
   };
 
@@ -557,6 +651,242 @@ async function getMessageById(messageId) {
   return res.Items?.[0] || null;
 }
 
+function collectS3KeysFromMessageItem(item) {
+  const keys = [];
+  if (!item || !Array.isArray(item.mediaItems)) return keys;
+  for (const it of item.mediaItems) {
+    const k = it?.s3Key;
+    if (typeof k === "string" && k.length > 0) keys.push(k);
+  }
+  return keys;
+}
+
+async function queryAllChannelMessageItems(conversationId, channelId) {
+  const out = [];
+  let ExclusiveStartKey = undefined;
+  const prefix = channelMessageSkPrefix(channelId);
+  do {
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: TableName(),
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :pre)",
+        ExpressionAttributeValues: {
+          ":pk": convPk(conversationId),
+          ":pre": prefix,
+        },
+        ExclusiveStartKey,
+      }),
+    );
+    if (Array.isArray(res.Items) && res.Items.length > 0) {
+      out.push(...res.Items.filter((it) => it.entityType === "Message"));
+    }
+    ExclusiveStartKey = res.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return out;
+}
+
+async function batchDeleteMessageRows(items) {
+  const table = TableName();
+  for (let i = 0; i < items.length; i += 25) {
+    const chunk = items.slice(i, i + 25);
+    await docClient.send(
+      new BatchWriteCommand({
+        RequestItems: {
+          [table]: chunk.map((it) => ({
+            DeleteRequest: {
+              Key: { PK: it.PK, SK: it.SK },
+            },
+          })),
+        },
+      }),
+    );
+  }
+}
+
+async function findLatestConversationMessageItem(conversationId) {
+  const rows = [];
+  let ExclusiveStartKey = undefined;
+  do {
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: TableName(),
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :ms)",
+        ExpressionAttributeValues: {
+          ":pk": convPk(conversationId),
+          ":ms": "MSG#",
+        },
+        ExclusiveStartKey,
+      }),
+    );
+    for (const it of res.Items || []) {
+      if (it.entityType === "Message") rows.push(it);
+    }
+    ExclusiveStartKey = res.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  if (rows.length === 0) return null;
+  rows.sort((a, b) =>
+    String(b.createdAt || "").localeCompare(String(a.createdAt || "")),
+  );
+  return rows[0];
+}
+
+async function refreshConversationLastMessageAfterDeletes(conversationId) {
+  const metaRes = await docClient.send(
+    new GetCommand({
+      TableName: TableName(),
+      Key: { PK: convPk(conversationId), SK: META_SK },
+    }),
+  );
+  const meta = metaRes.Item;
+  if (!meta) return;
+
+  const latest = await findLatestConversationMessageItem(conversationId);
+  const conversationType = String(meta.type || "GROUP");
+  const fallbackAt = String(meta.createdAt || new Date().toISOString());
+
+  let memberIds = [];
+  try {
+    memberIds = await listConversationMemberUserIds(conversationId);
+  } catch {
+    memberIds = [];
+  }
+
+  if (latest) {
+    const ts = latest.createdAt;
+    const mid = latest.messageId;
+    const msk = latest.SK;
+    await docClient.send(
+      new UpdateCommand({
+        TableName: TableName(),
+        Key: { PK: convPk(conversationId), SK: META_SK },
+        UpdateExpression:
+          "SET lastMessageAt = :ts, lastMessageId = :mid, lastMessageSK = :msk",
+        ExpressionAttributeValues: {
+          ":ts": ts,
+          ":mid": mid,
+          ":msk": msk,
+        },
+      }),
+    );
+    const g2sk = gsi2InboxSk(ts, conversationId);
+    await Promise.all(
+      memberIds.map((uid) =>
+        docClient.send(
+          new UpdateCommand({
+            TableName: TableName(),
+            Key: { PK: userPk(uid), SK: userConvSk(conversationId) },
+            UpdateExpression: [
+              "SET lastMessageAt = :ts, lastMessageId = :mid, lastMessageSK = :msk",
+              ", GSI2PK = :g2pk, GSI2SK = :g2sk",
+            ].join(" "),
+            ExpressionAttributeValues: {
+              ":ts": ts,
+              ":mid": mid,
+              ":msk": msk,
+              ":g2pk": gsi2Pk(uid),
+              ":g2sk": g2sk,
+            },
+          }),
+        ),
+      ),
+    );
+    return;
+  }
+
+  await docClient.send(
+    new UpdateCommand({
+      TableName: TableName(),
+      Key: { PK: convPk(conversationId), SK: META_SK },
+      UpdateExpression:
+        "SET lastMessageAt = :ts, lastMessageId = :empty, lastMessageSK = :empty",
+      ExpressionAttributeValues: {
+        ":ts": fallbackAt,
+        ":empty": "",
+      },
+    }),
+  );
+  const g2sk = gsi2InboxSk(fallbackAt, conversationId);
+  await Promise.all(
+    memberIds.map((uid) =>
+      docClient.send(
+        new UpdateCommand({
+          TableName: TableName(),
+          Key: { PK: userPk(uid), SK: userConvSk(conversationId) },
+          UpdateExpression: [
+            "SET lastMessageAt = :ts, lastMessageId = :empty, lastMessageSK = :empty",
+            ", GSI2PK = :g2pk, GSI2SK = :g2sk",
+            ", #tp = if_not_exists(#tp, :tp)",
+          ].join(" "),
+          ExpressionAttributeNames: { "#tp": "type" },
+          ExpressionAttributeValues: {
+            ":ts": fallbackAt,
+            ":empty": "",
+            ":g2pk": gsi2Pk(uid),
+            ":g2sk": g2sk,
+            ":tp": conversationType,
+          },
+        }),
+      ),
+    ),
+  );
+}
+
+/**
+ * Delete every message row (and S3 media) scoped to a group channel.
+ */
+async function deleteAllMessagesForChannel({ conversationId, channelId }) {
+  const cid = String(conversationId || "").trim();
+  const chId = String(channelId || "").trim();
+  if (!cid.startsWith("GROUP#") || !chId) {
+    return { deletedCount: 0 };
+  }
+
+  const items = await queryAllChannelMessageItems(cid, chId);
+  if (items.length === 0) {
+    return { deletedCount: 0 };
+  }
+
+  const metaRes = await docClient.send(
+    new GetCommand({
+      TableName: TableName(),
+      Key: { PK: convPk(cid), SK: META_SK },
+    }),
+  );
+  const meta = metaRes.Item;
+  const skPrefix = channelMessageSkPrefix(chId);
+  const needsInboxRefresh =
+    !meta?.lastMessageSK ||
+    String(meta.lastMessageSK).startsWith(skPrefix);
+
+  const s3Keys = new Set();
+  for (const it of items) {
+    for (const k of collectS3KeysFromMessageItem(it)) {
+      s3Keys.add(k);
+    }
+  }
+
+  await batchDeleteMessageRows(items);
+
+  for (const key of s3Keys) {
+    try {
+      await deleteObjectByKey(key);
+    } catch (e) {
+      console.error("deleteAllMessagesForChannel: S3 delete failed", {
+        conversationId: cid,
+        channelId: chId,
+        key,
+        error: e?.message,
+      });
+    }
+  }
+
+  if (needsInboxRefresh) {
+    await refreshConversationLastMessageAfterDeletes(cid);
+  }
+
+  return { deletedCount: items.length };
+}
+
 async function recallMessage(messageId, userId) {
   const item = await getMessageById(messageId);
   if (!item) return null;
@@ -790,6 +1120,111 @@ async function reactToMessage(messageId, userId, emojiRaw) {
   return messageToLegacy(updated, userId);
 }
 
+function buildSearchSnippet(text, needle, maxLen = 80) {
+  const t = String(text || "");
+  const n = String(needle || "").trim();
+  if (!t) return "";
+  const lower = t.toLowerCase();
+  const idx = n ? lower.indexOf(n.toLowerCase()) : -1;
+  if (idx < 0) {
+    return t.length > maxLen ? `${t.slice(0, maxLen)}…` : t;
+  }
+  const half = Math.floor((maxLen - n.length) / 2);
+  let start = Math.max(0, idx - half);
+  let end = Math.min(t.length, start + maxLen);
+  if (end - start < maxLen) start = Math.max(0, end - maxLen);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < t.length ? "…" : "";
+  return `${prefix}${t.slice(start, end)}${suffix}`;
+}
+
+function messageMatchesSearch(msg, query) {
+  const q = String(query || "").trim();
+  if (q.length < 2) return false;
+  if (!msg || msg.isRecalled || msg.isDeletedForMe || msg.isSystem) return false;
+  const text = String(msg.text || "").trim();
+  if (!text) return false;
+  return text.toLowerCase().includes(q.toLowerCase());
+}
+
+/** Search message text in a DM or across all channels in a group. */
+async function searchConversationMessages(viewerId, conversationId, query, options = {}) {
+  const q = String(query || "").trim();
+  if (q.length < 2) return [];
+
+  const limit = Math.min(50, Math.max(1, Number(options.limit) || 30));
+  const cid = String(conversationId || "");
+
+  let rows = [];
+  if (cid.startsWith("DM#")) {
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: TableName(),
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :ms)",
+        ExpressionAttributeValues: {
+          ":pk": convPk(conversationId),
+          ":ms": "MSG#",
+        },
+        ScanIndexForward: false,
+      }),
+    );
+    rows = (res.Items || []).filter((it) => {
+      const sk = String(it.SK || "");
+      return sk.startsWith("MSG#") && !sk.startsWith("MSG#CH#");
+    });
+  } else if (cid.startsWith("GROUP#")) {
+    const res = await docClient.send(
+      new QueryCommand({
+        TableName: TableName(),
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :ms)",
+        ExpressionAttributeValues: {
+          ":pk": convPk(conversationId),
+          ":ms": "MSG#CH#",
+        },
+        ScanIndexForward: false,
+      }),
+    );
+    rows = res.Items || [];
+  } else {
+    return [];
+  }
+
+  const matched = rows
+    .map((it) => messageToLegacy(it, viewerId))
+    .filter((m) => m && messageMatchesSearch(m, q));
+
+  matched.sort((a, b) =>
+    String(b.createdAt || "").localeCompare(String(a.createdAt || "")),
+  );
+
+  let channelNameById = {};
+  if (cid.startsWith("GROUP#")) {
+    const channels = await listChannels({ conversationId, userId: viewerId });
+    for (const ch of channels || []) {
+      if (ch?.channelId) {
+        channelNameById[String(ch.channelId)] = String(ch.name || "");
+      }
+    }
+  }
+
+  return matched.slice(0, limit).map((m) => {
+    const channelId = m.channelId ? String(m.channelId) : undefined;
+    return {
+      messageId: m._id,
+      text: m.text,
+      createdAt: m.createdAt,
+      senderId: m.senderId,
+      snippet: buildSearchSnippet(m.text, q),
+      ...(channelId
+        ? {
+            channelId,
+            channelName: channelNameById[channelId] || "",
+          }
+        : {}),
+    };
+  });
+}
+
 module.exports = {
   messageToLegacy,
   listDirectMessages,
@@ -797,9 +1232,11 @@ module.exports = {
   listConversationMessages,
   sendConversationMessage,
   getMessageById,
+  deleteAllMessagesForChannel,
   recallMessage,
   recallMessageMe,
   editMessageText,
   forwardMessage,
   reactToMessage,
+  searchConversationMessages,
 };

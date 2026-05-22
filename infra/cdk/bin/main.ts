@@ -30,6 +30,8 @@ function pick(
   return undefined;
 }
 
+const frontendBaseUrl = pick("frontendBaseUrl", process.env.FRONTEND_BASE_URL);
+
 const sesFromEmail = pick("sesFromEmail", process.env.SES_FROM_EMAIL);
 const sesFromName = pick("sesFromName", process.env.SES_FROM_NAME);
 const sesRegion = pick("sesRegion", process.env.SES_REGION);
@@ -78,6 +80,7 @@ new RushCordInfraStack(app, "RushCordInfraStack", {
           sesVerifiedDomain,
         }
       : undefined,
+  frontendBaseUrl,
   retainTableAndPool: retainData,
   mediaCorsOrigins,
 });

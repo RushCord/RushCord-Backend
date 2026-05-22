@@ -6,6 +6,10 @@ const {
   InitiateAuthCommand,
   RevokeTokenCommand,
   GlobalSignOutCommand,
+  ForgotPasswordCommand,
+  ConfirmForgotPasswordCommand,
+  ChangePasswordCommand,
+  AdminUpdateUserAttributesCommand,
 } = require("@aws-sdk/client-cognito-identity-provider");
 const jwt = require("jsonwebtoken");
 const { getCognitoConfig } = require("../lib/cognitoConfig");
@@ -140,6 +144,68 @@ function mapRefreshError(err) {
   }
   if (name === "TooManyRequestsException") {
     throwHttp(429, "RATE_LIMITED", "Too many requests. Please try again later.");
+  }
+  throwHttp(502, "COGNITO_ERROR", err.message || "Cognito error");
+}
+
+function mapForgotPasswordError(err) {
+  const name = err?.name || "";
+  if (name === "UserNotFoundException") {
+    throwHttp(404, "USER_NOT_FOUND", "User not found");
+  }
+  if (name === "LimitExceededException" || name === "TooManyRequestsException") {
+    throwHttp(429, "RATE_LIMITED", "Too many requests. Please try again later.");
+  }
+  if (name === "InvalidParameterException") {
+    throwHttp(400, "VALIDATION_ERROR", err.message || "Invalid parameters");
+  }
+  throwHttp(502, "COGNITO_ERROR", err.message || "Cognito error");
+}
+
+function mapChangePasswordError(err) {
+  const name = err?.name || "";
+  if (name === "NotAuthorizedException") {
+    throwHttp(401, "INVALID_CURRENT_PASSWORD", "Mật khẩu hiện tại không đúng");
+  }
+  if (name === "InvalidPasswordException") {
+    throwHttp(
+      400,
+      "VALIDATION_ERROR",
+      err.message || "Password does not satisfy the user pool policy"
+    );
+  }
+  if (name === "TooManyRequestsException" || name === "LimitExceededException") {
+    throwHttp(429, "RATE_LIMITED", "Too many requests. Please try again later.");
+  }
+  if (name === "InvalidParameterException") {
+    throwHttp(400, "VALIDATION_ERROR", err.message || "Invalid parameters");
+  }
+  throwHttp(502, "COGNITO_ERROR", err.message || "Cognito error");
+}
+
+function mapConfirmForgotPasswordError(err) {
+  const name = err?.name || "";
+  if (name === "CodeMismatchException") {
+    throwHttp(400, "INVALID_OTP", "Invalid verification code");
+  }
+  if (name === "ExpiredCodeException") {
+    throwHttp(400, "OTP_EXPIRED", "Verification code has expired");
+  }
+  if (name === "InvalidPasswordException") {
+    throwHttp(
+      400,
+      "VALIDATION_ERROR",
+      err.message || "Password does not satisfy the user pool policy"
+    );
+  }
+  if (name === "UserNotFoundException") {
+    throwHttp(404, "USER_NOT_FOUND", "User not found");
+  }
+  if (name === "TooManyRequestsException" || name === "LimitExceededException") {
+    throwHttp(429, "RATE_LIMITED", "Too many requests. Please try again later.");
+  }
+  if (name === "InvalidParameterException") {
+    throwHttp(400, "VALIDATION_ERROR", err.message || "Invalid parameters");
   }
   throwHttp(502, "COGNITO_ERROR", err.message || "Cognito error");
 }
@@ -294,6 +360,84 @@ async function globalSignOut({ accessToken }) {
   }
 }
 
+async function forgotPassword({ email }) {
+  const normalized = String(email).trim().toLowerCase();
+  try {
+    await cognitoClient().send(
+      new ForgotPasswordCommand({
+        ClientId: clientId(),
+        Username: normalized,
+      })
+    );
+  } catch (err) {
+    if (err.statusCode) throw err;
+    mapForgotPasswordError(err);
+  }
+}
+
+async function changePassword({ accessToken, currentPassword, newPassword }) {
+  try {
+    await cognitoClient().send(
+      new ChangePasswordCommand({
+        AccessToken: accessToken,
+        PreviousPassword: currentPassword,
+        ProposedPassword: newPassword,
+      })
+    );
+  } catch (err) {
+    if (err.statusCode) throw err;
+    mapChangePasswordError(err);
+  }
+}
+
+async function verifyPassword({ email, password }) {
+  await signInWithPassword({ email, password });
+}
+
+async function adminUpdateUserEmail({ userSub, newEmail }) {
+  const normalized = String(newEmail).trim().toLowerCase();
+  const { userPoolId } = getCognitoConfig();
+  try {
+    await cognitoClient().send(
+      new AdminUpdateUserAttributesCommand({
+        UserPoolId: userPoolId,
+        Username: userSub,
+        UserAttributes: [
+          { Name: "email", Value: normalized },
+          { Name: "email_verified", Value: "true" },
+        ],
+      })
+    );
+  } catch (err) {
+    if (err.statusCode) throw err;
+    const name = err?.name || "";
+    if (name === "AliasExistsException" || name === "UserLambdaValidationException") {
+      throwHttp(409, "EMAIL_ALREADY_EXISTS", "An account with this email already exists");
+    }
+    if (name === "InvalidParameterException") {
+      throwHttp(400, "VALIDATION_ERROR", err.message || "Invalid parameters");
+    }
+    throwHttp(502, "COGNITO_ERROR", err.message || "Cognito error");
+  }
+}
+
+async function confirmForgotPassword({ email, otpCode, newPassword }) {
+  const normalized = String(email).trim().toLowerCase();
+  try {
+    await cognitoClient().send(
+      new ConfirmForgotPasswordCommand({
+        ClientId: clientId(),
+        Username: normalized,
+        ConfirmationCode: String(otpCode).trim(),
+        Password: newPassword,
+      })
+    );
+  } catch (err) {
+    if (err.statusCode) throw err;
+    mapConfirmForgotPasswordError(err);
+  }
+}
+
 module.exports = {
   signUp,
   confirmSignUp,
@@ -302,4 +446,9 @@ module.exports = {
   refreshSession,
   revokeRefreshToken,
   globalSignOut,
+  forgotPassword,
+  confirmForgotPassword,
+  changePassword,
+  verifyPassword,
+  adminUpdateUserEmail,
 };

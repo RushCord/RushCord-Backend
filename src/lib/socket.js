@@ -2,8 +2,13 @@ const { Server } = require("socket.io");
 const http = require("http");
 const express = require("express");
 const { verifyAccessToken } = require("./cognitoVerifier");
+const { conversationChannelSocketRoom, groupVoiceRoomName } = require("./keys");
 const { assertUserInConversation } = require("../services/conversationService");
 const { listConversationMembers } = require("../services/conversationsService");
+const {
+  getChannelById,
+  getDefaultVoiceChannelIdForGroup,
+} = require("../services/channelsService");
 
 const app = express();
 const server = http.createServer(app);
@@ -20,6 +25,94 @@ const io = new Server(server, {
 });
 
 const userSocketMap = {}; // {userId: socketId}
+
+/** LiveKit voice room presence for sidebar (roomName -> Set<userId>) */
+const voiceRoomMembers = new Map();
+/** socket.id -> Set<roomName> */
+const socketVoiceRooms = new Map();
+
+function voiceMembersList(roomName) {
+  const set = voiceRoomMembers.get(roomName);
+  return set ? [...set].sort() : [];
+}
+
+function broadcastVoicePresence(io, conversationId, roomName) {
+  const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+  const rn = typeof roomName === "string" ? roomName.trim() : "";
+  if (!cid || !rn) return;
+  io.to(cid).emit("voiceChannelPresence", {
+    roomName: rn,
+    members: voiceMembersList(rn),
+  });
+}
+
+function addToVoiceRoom(io, socket, { roomName, conversationId, userId }) {
+  const rn = String(roomName || "").trim();
+  const cid = String(conversationId || "").trim();
+  const uid = String(userId || "").trim();
+  if (!rn || !cid || !uid) return;
+
+  if (!voiceRoomMembers.has(rn)) voiceRoomMembers.set(rn, new Set());
+  voiceRoomMembers.get(rn).add(uid);
+
+  if (!socketVoiceRooms.has(socket.id)) socketVoiceRooms.set(socket.id, new Set());
+  socketVoiceRooms.get(socket.id).add(rn);
+
+  socket.join(cid);
+  broadcastVoicePresence(io, cid, rn);
+}
+
+function removeFromVoiceRoom(io, socket, { roomName, conversationId, userId }) {
+  const rn = String(roomName || "").trim();
+  const cid = String(conversationId || "").trim();
+  const uid = String(userId || "").trim();
+  if (!rn || !cid || !uid) return;
+
+  const set = voiceRoomMembers.get(rn);
+  if (set) {
+    set.delete(uid);
+    if (set.size === 0) voiceRoomMembers.delete(rn);
+  }
+
+  const tracked = socketVoiceRooms.get(socket.id);
+  if (tracked) tracked.delete(rn);
+
+  broadcastVoicePresence(io, cid, rn);
+}
+
+function leaveAllVoiceRoomsForSocket(io, socket) {
+  const uid = socket.userId;
+  const tracked = socketVoiceRooms.get(socket.id);
+  if (!uid || !tracked) return;
+  for (const rn of [...tracked]) {
+    const cid = rn.includes("#VOICE#") ? rn.split("#VOICE#")[0] : rn;
+    removeFromVoiceRoom(io, socket, { roomName: rn, conversationId: cid, userId: uid });
+  }
+  socketVoiceRooms.delete(socket.id);
+}
+
+/** All voice rooms + members for a group (for clients opening the group sidebar). */
+function voicePresenceSnapshotForConversation(conversationId) {
+  const cid = String(conversationId || "").trim();
+  const rooms = {};
+  if (!cid.startsWith("GROUP#")) return rooms;
+  const prefix = `${cid}#VOICE#`;
+  for (const [roomName, set] of voiceRoomMembers.entries()) {
+    if (roomName.startsWith(prefix)) {
+      rooms[roomName] = voiceMembersList(roomName);
+    }
+  }
+  return rooms;
+}
+
+function emitVoicePresenceSnapshot(socket, conversationId) {
+  const cid = String(conversationId || "").trim();
+  if (!cid.startsWith("GROUP#")) return;
+  socket.emit("voicePresenceSnapshot", {
+    conversationId: cid,
+    rooms: voicePresenceSnapshotForConversation(cid),
+  });
+}
 
 function getReceiverSocketId(userId) {
   return userSocketMap[userId];
@@ -77,6 +170,13 @@ io.on("connection", (socket) => {
     const cid = typeof conversationId === "string" ? conversationId.trim() : "";
     if (!cid) return;
     socket.join(cid);
+    emitVoicePresenceSnapshot(socket, cid);
+  });
+
+  socket.on("requestVoicePresence", ({ conversationId } = {}) => {
+    const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+    if (!cid) return;
+    emitVoicePresenceSnapshot(socket, cid);
   });
 
   socket.on("leaveConversation", ({ conversationId } = {}) => {
@@ -85,28 +185,68 @@ io.on("connection", (socket) => {
     socket.leave(cid);
   });
 
-  socket.on("typingInConversation", ({ conversationId } = {}) => {
+  socket.on("joinConversationChannel", ({ conversationId, channelId } = {}) => {
     const cid = typeof conversationId === "string" ? conversationId.trim() : "";
-    if (!cid) return;
-    socket.to(cid).emit("typingInConversation", { from: userId, conversationId: cid });
+    const ch = typeof channelId === "string" ? channelId.trim() : "";
+    if (!cid || !ch || !cid.startsWith("GROUP#")) return;
+    socket.join(conversationChannelSocketRoom(cid, ch));
   });
 
-  socket.on("stopTypingInConversation", ({ conversationId } = {}) => {
+  socket.on("leaveConversationChannel", ({ conversationId, channelId } = {}) => {
+    const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+    const ch = typeof channelId === "string" ? channelId.trim() : "";
+    if (!cid || !ch) return;
+    socket.leave(conversationChannelSocketRoom(cid, ch));
+  });
+
+  socket.on("typingInConversation", ({ conversationId, channelId } = {}) => {
     const cid = typeof conversationId === "string" ? conversationId.trim() : "";
     if (!cid) return;
-    socket.to(cid).emit("stopTypingInConversation", { from: userId, conversationId: cid });
+    const room =
+      channelId && typeof channelId === "string" && cid.startsWith("GROUP#")
+        ? conversationChannelSocketRoom(cid, channelId.trim())
+        : cid;
+    socket.to(room).emit("typingInConversation", {
+      from: userId,
+      conversationId: cid,
+      channelId: channelId && typeof channelId === "string" ? channelId.trim() : undefined,
+    });
+  });
+
+  socket.on("stopTypingInConversation", ({ conversationId, channelId } = {}) => {
+    const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+    if (!cid) return;
+    const room =
+      channelId && typeof channelId === "string" && cid.startsWith("GROUP#")
+        ? conversationChannelSocketRoom(cid, channelId.trim())
+        : cid;
+    socket.to(room).emit("stopTypingInConversation", {
+      from: userId,
+      conversationId: cid,
+      channelId: channelId && typeof channelId === "string" ? channelId.trim() : undefined,
+    });
   });
 
   // =========================
   // 🎥 LIVEKIT CALL CONTROL (no SDP/ICE signaling)
   // =========================
-  socket.on("callInviteGroup", async ({ conversationId } = {}) => {
+  socket.on("callInviteGroup", async ({ conversationId, voiceChannelId } = {}) => {
     try {
       const cid = typeof conversationId === "string" ? conversationId.trim() : "";
-      if (!cid) return;
+      if (!cid || !cid.startsWith("GROUP#")) return;
 
-      // Permission: only members can start/invite into the room.
       await assertUserInConversation({ conversationId: cid, userId });
+
+      let vid = typeof voiceChannelId === "string" ? voiceChannelId.trim() : "";
+      if (!vid) {
+        vid = (await getDefaultVoiceChannelIdForGroup(cid)) || "";
+      }
+      if (!vid) return;
+
+      const ch = await getChannelById(cid, vid);
+      if (!ch || ch.channelType !== "VOICE") return;
+
+      const roomName = groupVoiceRoomName(cid, vid);
 
       const members = await listConversationMembers(cid);
       for (const m of Array.isArray(members) ? members : []) {
@@ -119,8 +259,9 @@ io.on("connection", (socket) => {
         if (!receiverSocketId) continue;
         io.to(receiverSocketId).emit("incomingCall", {
           from: userId,
-          roomName: cid,
+          roomName,
           conversationId: cid,
+          voiceChannelId: vid,
           kind: "GROUP",
         });
       }
@@ -171,11 +312,65 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("hangupGroup", async ({ conversationId } = {}) => {
+  socket.on("voiceChannelJoin", async ({ conversationId, voiceChannelId, roomName } = {}) => {
     try {
       const cid = typeof conversationId === "string" ? conversationId.trim() : "";
-      if (!cid) return;
+      if (!cid || !cid.startsWith("GROUP#")) return;
       await assertUserInConversation({ conversationId: cid, userId });
+
+      let rn = typeof roomName === "string" ? roomName.trim() : "";
+      if (!rn) {
+        let vid = typeof voiceChannelId === "string" ? voiceChannelId.trim() : "";
+        if (!vid) vid = (await getDefaultVoiceChannelIdForGroup(cid)) || "";
+        if (vid) rn = groupVoiceRoomName(cid, vid);
+      }
+      if (!rn) return;
+
+      addToVoiceRoom(io, socket, { roomName: rn, conversationId: cid, userId });
+    } catch (e) {
+      console.error("voiceChannelJoin error:", e?.message || e);
+    }
+  });
+
+  socket.on("voiceChannelLeave", async ({ conversationId, voiceChannelId, roomName } = {}) => {
+    try {
+      const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+      if (!cid || !cid.startsWith("GROUP#")) return;
+
+      let rn = typeof roomName === "string" ? roomName.trim() : "";
+      if (!rn) {
+        let vid = typeof voiceChannelId === "string" ? voiceChannelId.trim() : "";
+        if (!vid) vid = (await getDefaultVoiceChannelIdForGroup(cid)) || "";
+        if (vid) rn = groupVoiceRoomName(cid, vid);
+      }
+      if (!rn) return;
+
+      removeFromVoiceRoom(io, socket, {
+        roomName: rn,
+        conversationId: cid,
+        userId,
+      });
+    } catch (e) {
+      console.error("voiceChannelLeave error:", e?.message || e);
+    }
+  });
+
+  socket.on("hangupGroup", async ({ conversationId, voiceChannelId, roomName } = {}) => {
+    try {
+      const cid = typeof conversationId === "string" ? conversationId.trim() : "";
+      if (!cid || !cid.startsWith("GROUP#")) return;
+      await assertUserInConversation({ conversationId: cid, userId });
+
+      let room =
+        typeof roomName === "string" && roomName.trim().length > 0 ? roomName.trim() : "";
+      if (!room) {
+        let vid = typeof voiceChannelId === "string" ? voiceChannelId.trim() : "";
+        if (!vid) {
+          vid = (await getDefaultVoiceChannelIdForGroup(cid)) || "";
+        }
+        if (vid) room = groupVoiceRoomName(cid, vid);
+        else room = cid;
+      }
 
       const members = await listConversationMembers(cid);
       for (const m of Array.isArray(members) ? members : []) {
@@ -188,7 +383,7 @@ io.on("connection", (socket) => {
         if (!receiverSocketId) continue;
         io.to(receiverSocketId).emit("hangup", {
           from: userId,
-          roomName: cid,
+          roomName: room,
           conversationId: cid,
           kind: "GROUP",
         });
@@ -202,6 +397,8 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("A user disconnected", socket.id);
+
+    leaveAllVoiceRoomsForSocket(io, socket);
 
     if (userId) {
       delete userSocketMap[userId];

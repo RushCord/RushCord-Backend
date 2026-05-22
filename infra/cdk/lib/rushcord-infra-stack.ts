@@ -17,6 +17,8 @@ import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import type { Construct } from "constructs";
 
 export interface RushCordInfraStackProps extends cdk.StackProps {
+  /** Base URL for frontend reset-password links in Cognito CustomMessage emails */
+  frontendBaseUrl?: string;
   sesEmail?: {
     fromEmail: string;
     fromName?: string;
@@ -264,6 +266,43 @@ export class RushCordInfraStack extends cdk.Stack {
       postConfirmationFn
     );
 
+    const customMessageRoot = path.join(
+      __dirname,
+      "..",
+      "..",
+      "..",
+      "lambdas",
+      "custom-message"
+    );
+
+    const customMessageFn = new NodejsFunction(this, "CustomMessageFn", {
+      entry: path.join(customMessageRoot, "handler.mjs"),
+      handler: "handler",
+      functionName: `${this.stackName}-CustomMessage`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      environment: {
+        FRONTEND_BASE_URL:
+          props?.frontendBaseUrl ?? "http://localhost:5173",
+      },
+      bundling: {
+        format: OutputFormat.ESM,
+        bundleAwsSDK: false,
+        minify: true,
+        sourceMap: false,
+        target: "node20",
+        mainFields: ["module", "main"],
+      },
+      projectRoot: customMessageRoot,
+      depsLockFilePath: path.join(customMessageRoot, "package-lock.json"),
+    });
+
+    this.userPool.addTrigger(
+      cognito.UserPoolOperation.CUSTOM_MESSAGE,
+      customMessageFn
+    );
+
     const corsOrigins =
       props?.mediaCorsOrigins !== undefined &&
       props.mediaCorsOrigins.length > 0
@@ -336,6 +375,11 @@ export class RushCordInfraStack extends cdk.Stack {
     new cdk.CfnOutput(this, "PostConfirmationFnArn", {
       value: postConfirmationFn.functionArn,
       description: "Post Confirmation Lambda ARN",
+    });
+
+    new cdk.CfnOutput(this, "CustomMessageFnArn", {
+      value: customMessageFn.functionArn,
+      description: "Custom Message Lambda ARN (forgot-password reset link emails)",
     });
 
     new cdk.CfnOutput(this, "MediaBucketName", {

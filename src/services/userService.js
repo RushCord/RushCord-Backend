@@ -11,6 +11,9 @@ const {
   PROFILE_SK,
   emailPk,
   EMAIL_REF_SK,
+  EMAIL_CHANGE_SK,
+  emailChangeTokenPk,
+  META_SK,
 } = require("../lib/keys");
 
 const TableName = () => getTableName();
@@ -22,6 +25,24 @@ function toPublicUser(item) {
     fullName: item.fullName,
     email: item.email,
     profilePic: item.avatarUrl || "",
+    coverPic: item.coverImageUrl || "",
+    dateOfBirth: item.dateOfBirth || "",
+    gender: item.gender || "",
+    createdAt: item.createdAt || null,
+  };
+}
+
+/** Public profile for other users (no email). */
+function toPublicUserExplore(item) {
+  if (!item) return null;
+  return {
+    _id: item.userId,
+    fullName: item.fullName,
+    profilePic: item.avatarUrl || "",
+    coverPic: item.coverImageUrl || "",
+    dateOfBirth: item.dateOfBirth || "",
+    gender: item.gender || "",
+    createdAt: item.createdAt || null,
   };
 }
 
@@ -126,25 +147,141 @@ async function listProfilesExcept(excludeUserId) {
   return out;
 }
 
-async function updateProfileAvatar(userId, avatarUrl) {
+async function searchUsersForExplore(excludeUserId, query, limit = 40) {
+  const all = await listProfilesExcept(excludeUserId);
+  const cap = Math.min(80, Math.max(1, Number(limit) || 40));
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) {
+    return all
+      .slice()
+      .sort((a, b) => String(a.fullName || "").localeCompare(String(b.fullName || "")))
+      .slice(0, cap);
+  }
+  return all
+    .filter((u) => {
+      const name = String(u.fullName || "").toLowerCase();
+      const mail = String(u.email || "").toLowerCase();
+      const id = String(u._id || "").toLowerCase();
+      return name.includes(needle) || mail.includes(needle) || id.includes(needle);
+    })
+    .slice()
+    .sort((a, b) => String(a.fullName || "").localeCompare(String(b.fullName || "")))
+    .slice(0, cap);
+}
+
+const PROFILE_UPDATE_KEYS = new Set([
+  "avatarUrl",
+  "coverImageUrl",
+  "fullName",
+  "dateOfBirth",
+  "gender",
+]);
+
+async function updateUserProfile(userId, updates) {
+  const entries = Object.entries(updates).filter(
+    ([k, v]) => PROFILE_UPDATE_KEYS.has(k) && v !== undefined,
+  );
+  if (entries.length === 0) {
+    return getProfileRaw(userId);
+  }
   const now = new Date().toISOString();
+  const ExpressionAttributeValues = { ":u": now };
+  const setFragments = entries.map(([key, value], i) => {
+    const vk = `:v${i}`;
+    ExpressionAttributeValues[vk] = value;
+    return `${key} = ${vk}`;
+  });
+  setFragments.push("updatedAt = :u");
+  const UpdateExpression = `SET ${setFragments.join(", ")}`;
   await docClient.send(
     new UpdateCommand({
       TableName: TableName(),
       Key: { PK: userPk(userId), SK: PROFILE_SK },
-      UpdateExpression: "SET avatarUrl = :a, updatedAt = :u",
-      ExpressionAttributeValues: { ":a": avatarUrl, ":u": now },
-      ReturnValues: "ALL_NEW",
+      UpdateExpression,
+      ExpressionAttributeValues,
     }),
   );
   return getProfileRaw(userId);
 }
 
+async function commitEmailChange({ userId, oldEmail, newEmail, tokenHash }) {
+  const normalizedOld = String(oldEmail).trim().toLowerCase();
+  const normalizedNew = String(newEmail).trim().toLowerCase();
+  const now = new Date().toISOString();
+  const table = TableName();
+
+  const emailRef = {
+    PK: emailPk(normalizedNew),
+    SK: EMAIL_REF_SK,
+    entityType: "EmailRef",
+    userId,
+    email: normalizedNew,
+  };
+
+  try {
+    await docClient.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Update: {
+              TableName: table,
+              Key: { PK: userPk(userId), SK: PROFILE_SK },
+              UpdateExpression: "SET email = :e, updatedAt = :u",
+              ExpressionAttributeValues: {
+                ":e": normalizedNew,
+                ":u": now,
+              },
+              ConditionExpression: "attribute_exists(PK)",
+            },
+          },
+          {
+            Delete: {
+              TableName: table,
+              Key: { PK: emailPk(normalizedOld), SK: EMAIL_REF_SK },
+            },
+          },
+          {
+            Put: {
+              TableName: table,
+              Item: emailRef,
+              ConditionExpression: "attribute_not_exists(PK)",
+            },
+          },
+          {
+            Delete: {
+              TableName: table,
+              Key: { PK: userPk(userId), SK: EMAIL_CHANGE_SK },
+            },
+          },
+          {
+            Delete: {
+              TableName: table,
+              Key: { PK: emailChangeTokenPk(tokenHash), SK: META_SK },
+            },
+          },
+        ],
+      })
+    );
+  } catch (e) {
+    if (e.name === "TransactionCanceledException") {
+      const err = new Error("EMAIL_ALREADY_EXISTS");
+      err.code = "EMAIL_ALREADY_EXISTS";
+      throw err;
+    }
+    throw e;
+  }
+
+  return getProfileRaw(userId);
+}
+
 module.exports = {
   toPublicUser,
+  toPublicUserExplore,
   getProfileRaw,
   getUserByEmail,
   createUser,
   listProfilesExcept,
-  updateProfileAvatar,
+  searchUsersForExplore,
+  updateUserProfile,
+  commitEmailChange,
 };

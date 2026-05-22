@@ -25,7 +25,11 @@ async function mintToken(req, res) {
       });
     }
 
-    await assertUserInConversation({ conversationId: roomName, userId });
+    let conversationId = roomName;
+    if (roomName.includes("#VOICE#")) {
+      conversationId = roomName.split("#VOICE#")[0];
+    }
+    await assertUserInConversation({ conversationId, userId });
 
     const apiKey = requireEnv("LIVEKIT_API_KEY");
     const apiSecret = requireEnv("LIVEKIT_API_SECRET");
