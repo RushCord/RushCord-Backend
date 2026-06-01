@@ -18,8 +18,8 @@ async function presignedUpload(req, res) {
     const userId = req.user._id;
     const { purpose, fileName, contentType, contentLength } = req.body ?? {};
 
-    if (purpose !== "avatar" && purpose !== "message") {
-      return res.status(400).json({ message: "purpose must be avatar or message" });
+    if (purpose !== "avatar" && purpose !== "cover" && purpose !== "message") {
+      return res.status(400).json({ message: "purpose must be avatar, cover, or message" });
     }
 
     const ct = String(contentType || "").trim();
@@ -38,11 +38,11 @@ async function presignedUpload(req, res) {
       });
     }
 
-    if (purpose === "avatar") {
+    if (purpose === "avatar" || purpose === "cover") {
       if (!ct.startsWith("image/")) {
         return res.status(400).json({
           code: "UNSUPPORTED_CONTENT_TYPE",
-          message: "Avatar must be an image type",
+          message: "Avatar and cover must be an image type",
         });
       }
       const maxBytes = getMaxUploadBytesForContentType(ct);

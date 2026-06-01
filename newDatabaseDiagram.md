@@ -26,7 +26,7 @@ Mô hình message: **Option A** — `SK` của message kết hợp **thời gian
 | ------------- | ------------------------------------------------------ |
 | **Tên gợi ý** | `GSI1`                                                 |
 | **GSI1PK**    | `MSG#<messageId>`                                      |
-| **GSI1SK**    | `CONV#<conversationId>#SK#MSG#<createdAt>#<messageId>` |
+| **GSI1SK**    | `CONV#<conversationId>#SK#<messageRowSK>` (messageRowSK = `MSG#…` hoặc `MSG#CH#<channelId>#…`) |
 
 
 **Tác dụng**
@@ -81,12 +81,14 @@ Dưới đây: **PK**, **SK**, field dự kiến, và **ý nghĩa**.
 | `type`           | `DM`             | `GROUP`                                                                                                              |
 | `title`          | string, optional | Tên nhóm (GROUP); DM có thể để trống, hiển thị lấy từ user kia.                                                      |
 | `avatar`         | string, optional | Ảnh đại diện nhóm.                                                                                                   |
+| `cover`          | string, optional | Ảnh bìa nhóm (card trang khám phá nhóm).                                                                             |
 | `createdAt`      | ISO string       | Thời điểm tạo phòng.                                                                                                 |
 | `createdBy`      | string (userId)  | Người tạo (nhóm).                                                                                                    |
 | `lastMessageAt`  | ISO string       | Thời gian tin **mới nhất** trong phòng.                                                                              |
 | `lastMessageId`  | string           | Id tin mới nhất.                                                                                                     |
-| `lastMessageSK`  | string           | **SK đầy đủ** của tin mới nhất (`MSG#<createdAt>#<messageId>`), dùng so sánh với `lastReadSK`, mark-read “tới cuối”. |
+| `lastMessageSK`  | string           | **SK đầy đủ** của tin mới nhất (`MSG#…` — legacy hoặc `MSG#CH#<channelId>#…` cho nhóm có kênh), dùng so sánh với `lastReadSK`, mark-read “tới cuối”. |
 | `memberCount`    | number           | Số thành viên (tiện hiển thị/quản trị).                                                                              |
+| `joinPolicy`     | string, optional | `OPEN` (mặc định) — join qua Explore hoặc invite; `INVITE_ONLY` — chỉ qua mã mời, ẩn Explore.                        |
 
 
 **Tác dụng tổng thể**
@@ -112,15 +114,72 @@ Dưới đây: **PK**, **SK**, field dự kiến, và **ý nghĩa**.
 | `conversationId` | Phòng chứa member.                                     |
 | `userId`         | User trong phòng.                                      |
 | `fullName`       | **Snapshot** tên hiển thị (list member/mention nhanh). |
-| `role`           | `OWNER`                                                |
+| `role`           | `OWNER` \| `ADMIN` \| `MEMBER`                         |
 | `joinedAt`       | Thời gian vào phòng.                                   |
-| `status`         | PENDING | ACCEPTED                                     |
+| `adminGrantedAt` | Thời điểm được cấp `ADMIN` (xóa khi hạ về `MEMBER`).   |
+| `updatedAt`      | Lần cập nhật role gần nhất.                            |
+| `status`         | PENDING \| ACCEPTED                                    |
 
 
 **Tác dụng**
 
 - **Query** `PK = CONV#cid` và `SK begins_with MEMBER#` → **danh sách thành viên**.
 - **GetItem** `PK=CONV#cid`, `SK=MEMBER#uid` → **kiểm tra user có trong phòng** (authorize gửi/đọc).
+
+---
+
+### 3.2a. `GroupInvite` — lời mời tham gia nhóm (link / QR)
+
+|            |                                      |
+| ---------- | ------------------------------------ |
+| **PK**     | `CONV#<conversationId>`              |
+| **SK**     | `INVITE#<inviteId>` (UUID)           |
+| **GSI**    | Không                                |
+
+| Field            | Ý nghĩa |
+| ---------------- | ------- |
+| `inviteId`       | UUID invite. |
+| `conversationId` | Nhóm được mời vào. |
+| `codeHash`       | SHA-256 của mã (lookup join). |
+| `inviteCode`     | Mã plaintext (chỉ trả qua API list/create cho OWNER/ADMIN; dùng hiển thị link/QR). |
+| `createdBy`      | userId người tạo. |
+| `createdAt`      | ISO. |
+| `expiresAt`      | ISO hoặc null (không hết hạn). |
+| `maxUses`        | number hoặc null (không giới hạn). |
+| `usesCount`      | Số lần đã dùng. |
+| `revoked`        | boolean. |
+| `revokedAt`      | ISO, optional. |
+
+**Lookup theo mã (public join):**
+
+|            |                         |
+| ---------- | ----------------------- |
+| **PK**     | `INVITE#<codeHash>`     |
+| **SK**     | `META`                  |
+
+Cùng các trường validate (`conversationId`, `inviteId`, `expiresAt`, `maxUses`, `usesCount`, `revoked`). **GetItem** theo hash → resolve nhóm; **TransactWrite** khi accept tăng `usesCount` trên cả hai dòng.
+
+---
+
+### 3.2b. `Channel` — kênh trong nhóm (`GROUP`): thông tin, chat, thoại
+
+|            |                                      |
+| ---------- | ------------------------------------ |
+| **PK**     | `CONV#<conversationId>`              |
+| **SK**     | `CHANNEL#<INFO\|CHAT\|VOICE>#<channelId>` (UUID) |
+| **GSI**    | Không                                |
+
+| Field            | Ý nghĩa |
+| ---------------- | ------- |
+| `conversationId` | Nhóm chứa kênh. |
+| `channelId`      | UUID kênh. |
+| `channelType`    | `INFO` — chỉ OWNER/ADMIN gửi tin; `CHAT` — chat nhóm; `VOICE` — phòng gọi (LiveKit `roomName` = `<conversationId>#VOICE#<channelId>`). |
+| `name`           | Tên hiển thị. |
+| `createdAt` / `createdBy` | Audit. |
+
+**Mặc định** khi tạo nhóm: server tạo đúng **1** kênh mỗi loại. OWNER/ADMIN có thể thêm kênh (CRUD qua API); không được xóa kênh cuối cùng của một loại (phải giữ tối thiểu 1 INFO, 1 CHAT, 1 VOICE). Khi xóa kênh, server xóa luôn mọi tin `MSG#CH#<channelId>#…` (và media S3); nếu tin cuối của hội thoại thuộc kênh đó thì cập nhật lại preview/inbox.
+
+**Migration nhóm cũ** (chưa có dòng `CHANNEL#`): lần đầu `GET /channels`, server tự seed 3 kênh mặc định. Tin cũ dùng `SK` dạng `MSG#<iso>#<id>` vẫn đọc được qua endpoint messages “mặc định” (merge với kênh CHAT mặc định) cho đến khi client chỉ dùng tin theo kênh mới.
 
 ---
 
@@ -161,15 +220,16 @@ Dưới đây: **PK**, **SK**, field dự kiến, và **ý nghĩa**.
 |            |                                                        |
 | ---------- | ------------------------------------------------------ |
 | **PK**     | `CONV#<conversationId>`                                |
-| **SK**     | `MSG#<createdAt>#<messageId>`                          |
+| **SK**     | **DM / legacy GROUP:** `MSG#<createdAt>#<messageId>` — **GROUP (theo kênh):** `MSG#CH#<channelId>#<createdAt>#<messageId>` |
 | **GSI1PK** | `MSG#<messageId>`                                      |
-| **GSI1SK** | `CONV#<conversationId>#SK#MSG#<createdAt>#<messageId>` |
+| **GSI1SK** | `CONV#<conversationId>#SK#<đúng SK của dòng message>` |
 
 
 
 | Field            | Ý nghĩa                              |
 | ---------------- | ------------------------------------ |
 | `conversationId` | Phòng chứa tin.                      |
+| `channelId`      | Optional — kênh CHAT/INFO (nhóm); không set cho DM / tin legacy. |
 | `messageId`      | UUID — id ổn định, tra cứu qua GSI1. |
 | `createdAt`      | ISO — thời điểm tạo; một phần của SK để sort. |
 | `senderId`       | Người gửi; **chỉ** `senderId` mới được **thu hồi** hoặc **chỉnh sửa** (theo nghiệp vụ đã chốt). |
@@ -196,7 +256,8 @@ Dưới đây: **PK**, **SK**, field dự kiến, và **ý nghĩa**.
 
 **Tác dụng**
 
-- **Query** `PK=CONV#cid`, `SK begins_with MSG#` → timeline, phân trang theo SK.
+- **Query** `PK=CONV#cid`, `SK begins_with MSG#CH#<channelId>#` → timeline theo **một kênh** nhóm.
+- **Query** `PK=CONV#cid`, `SK begins_with MSG#` → toàn bộ tin (dùng khi merge legacy + kênh mặc định).
 - **Đọc/chưa đọc**: so sánh `SK` với `UserConversation.lastReadSK`.
 - **Thu hồi**: API trả nội dung tùy `recallScope` và `viewerId` (với `"ME"`, chỉ khi `viewerId === senderId` thì coi là đã thu hồi). Không trả `text` / `media` khi tin đã thu hồi **đối với** viewer tương ứng.
 - **Chỉnh sửa**: chỉ `senderId`; cập nhật `text` và `editHistory` như trên. Lịch sử nhúng trong item — chú ý giới hạn **400 KB** / item DynamoDB.

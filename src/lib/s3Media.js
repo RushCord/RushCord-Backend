@@ -127,9 +127,10 @@ function extFromMime(mime) {
 function buildObjectKey({ purpose, userId, fileName, contentType }) {
   const safe = sanitizeOriginalFileName(fileName);
   const id = randomUUID();
-  if (purpose === "avatar") {
+  if (purpose === "avatar" || purpose === "cover") {
     const ext = path.extname(safe) || extFromMime(contentType) || ".jpg";
-    return `avatars/${userId}/${id}${ext}`;
+    const folder = purpose === "cover" ? "covers" : "avatars";
+    return `${folder}/${userId}/${id}${ext}`;
   }
   return `messages/${userId}/${id}-${safe}`;
 }

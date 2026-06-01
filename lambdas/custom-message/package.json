@@ -1,0 +1,9 @@
+{
+  "name": "rushcord-custom-message",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  }
+}
