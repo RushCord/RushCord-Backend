@@ -19,4 +19,3 @@ router.delete("/requests/:otherUserId", protectRoute, deleteRequest);
 router.delete("/:otherUserId", protectRoute, deleteFriend);
 
 module.exports = router;
-
